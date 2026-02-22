@@ -26,13 +26,22 @@ def _parse_int_set(value: str | None) -> set[int]:
 
 class LLMClient:
     def __init__(self, provider: str | None = None, model: str | None = None):
-        self.provider = (provider or getenv("LLM_PROVIDER", "openai")).lower()
+        self.provider = (provider or getenv("LLM_PROVIDER", "gemini")).lower()
         self.model = model
         self.timeout = float(getenv("LLM_TIMEOUT", "30"))
         self.retries = int(getenv("LLM_RETRIES", "2"))
         self.backoff = float(getenv("LLM_RETRY_BACKOFF", "0.5"))
         self.backoff_mode = getenv("LLM_RETRY_MODE", "exponential")  # exponential | fixed
         self.retry_statuses = _parse_int_set(getenv("LLM_RETRY_STATUS", "429,500,502,503,504"))
+
+    def _resolve_model(self, provider_model_key: str, provider_default: str) -> str:
+        # Priority: explicit arg > provider-specific env > generic env > provider default
+        return (
+            self.model
+            or getenv(provider_model_key)
+            or getenv("LLM_MODEL")
+            or provider_default
+        )
 
     def available(self) -> bool:
         if self.provider == "openai":
@@ -83,7 +92,7 @@ class LLMClient:
         api_key = getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set")
-        model = self.model or getenv("OPENAI_MODEL", "gpt-4o-mini")
+        model = self._resolve_model("OPENAI_MODEL", "gpt-4o-mini")
         data = {
             "model": model,
             "messages": [
@@ -109,7 +118,7 @@ class LLMClient:
         api_key = getenv("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is not set")
-        model = self.model or getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+        model = self._resolve_model("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
         data = {
             "model": model,
             "max_tokens": 1024,
@@ -139,7 +148,7 @@ class LLMClient:
         api_key = getenv("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY is not set")
-        model = self.model or getenv("GEMINI_MODEL", "gemini-1.5-pro")
+        model = self._resolve_model("GEMINI_MODEL", "gemini-1.5-pro")
         data = {
             "contents": [
                 {"role": "user", "parts": [{"text": f"{system_message}\n\n{user_message}"}]}

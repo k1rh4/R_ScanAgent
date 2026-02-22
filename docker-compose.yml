@@ -4,17 +4,33 @@ services:
     image: redscan:latest
     ports:
       - "8000:8000"
-    working_dir: /work
     volumes:
-      - ./:/work
+      - ./output:/app/output
+      - ./runtime:/app/runtime
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - LLM_PROVIDER=${LLM_PROVIDER}
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
+      - LLM_MODEL=${LLM_MODEL}
       - OPENAI_MODEL=${OPENAI_MODEL}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_MODEL=${GEMINI_MODEL}
-      - REDSCAN_CONCURRENCY=4
-      - REDSCAN_QUEUE_SIZE=100
+      - LLM_TIMEOUT=${LLM_TIMEOUT:-30}
+      - LLM_RETRIES=${LLM_RETRIES:-2}
+      - LLM_RETRY_BACKOFF=${LLM_RETRY_BACKOFF:-0.5}
+      - LLM_RETRY_MODE=${LLM_RETRY_MODE:-exponential}
+      - LLM_RETRY_STATUS=${LLM_RETRY_STATUS:-429,500,502,503,504}
+      - REDSCAN_CONCURRENCY=${REDSCAN_CONCURRENCY:-4}
+      - REDSCAN_QUEUE_SIZE=${REDSCAN_QUEUE_SIZE:-100}
+      - REDSCAN_RESULT_TTL_SEC=${REDSCAN_RESULT_TTL_SEC:-3600}
+      - REDSCAN_RESULT_MAX_ITEMS=${REDSCAN_RESULT_MAX_ITEMS:-10000}
+      - REDSCAN_ENABLE_COMMIX=${REDSCAN_ENABLE_COMMIX:-1}
+      - REDSCAN_ENABLE_FFUF=${REDSCAN_ENABLE_FFUF:-1}
+      - REDSCAN_TOOL_TIMEOUT=${REDSCAN_TOOL_TIMEOUT:-45}
+      - REDSCAN_SCAN_LOG_MAX_BYTES=${REDSCAN_SCAN_LOG_MAX_BYTES:-10485760}
+      - REDSCAN_SCAN_LOG_BACKUP_COUNT=${REDSCAN_SCAN_LOG_BACKUP_COUNT:-5}
+      - REDSCAN_OUTPUT_DIR=/app/output
+      - REDSCAN_SCAN_LOG=/app/runtime/scan.log
+      - REDSCAN_COMPLETE_PATH_LOG=/app/runtime/complete_path.log
     command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

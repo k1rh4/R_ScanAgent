@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import difflib
+import shlex
 from urllib.parse import urlencode
 import tempfile
 import time
@@ -216,7 +217,23 @@ def probe_candidates(req, candidates, policy: Policy, active: bool = False) -> L
 
         # Active probing via HTTP replay (lightweight)
         if c.vuln_type != "Unrestricted File Upload":
-            base_r, base_t = get_baseline()
+            try:
+                base_r, base_t = get_baseline()
+            except Exception as e:
+                for p in payloads:
+                    results.append(
+                        ProbeResult(
+                            str(uuid.uuid4()),
+                            c.vuln_type,
+                            f"{c.param}/{c.location}",
+                            c.reason,
+                            tool,
+                            p,
+                            status,
+                            f"error=baseline_failed:{e}",
+                        )
+                    )
+                continue
             for p in payloads:
                 pid = str(uuid.uuid4())
                 url, headers, body = _apply_param(req, c.location, c.param, p)
@@ -271,9 +288,22 @@ def write_raw_request(raw: str) -> str:
         return f.name
 
 
-def sqlmap_command(req, candidate, raw_request_path: str) -> str:
+def sqlmap_command(req, candidate, raw_request_path: str) -> List[str]:
     param = candidate.param
-    return f"sqlmap -r '{raw_request_path}' -p '{param}' --batch --flush-session --random-agent"
+    return [
+        "sqlmap",
+        "-r",
+        raw_request_path,
+        "-p",
+        param,
+        "--batch",
+        "--flush-session",
+        "--random-agent",
+    ]
+
+
+def shell_join(argv: List[str]) -> str:
+    return shlex.join(argv)
 
 
 def build_python_exploit(req, candidate, payload) -> str:

@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from redscan.agent import RedScanAgent
+from redscan.output_writer import OutputWriter
+from redscan.path_tracker import CompletedPathTracker
+from redscan.scan_logger import ScanLogger
 
 
 def load_input(path: str | None) -> dict:
@@ -23,21 +27,77 @@ def main():
     args = p.parse_args()
 
     data = load_input(args.input)
-    agent = RedScanAgent(policy_path=args.policy)
+    path_tracker = CompletedPathTracker(os.getenv("REDSCAN_COMPLETE_PATH_LOG", "complete_path.log"))
+    scan_logger = ScanLogger(os.getenv("REDSCAN_SCAN_LOG", "scan.log"))
+    output_writer = OutputWriter(os.getenv("REDSCAN_OUTPUT_DIR", "output"))
+    path = path_tracker.extract_path(data)
+    if not path_tracker.try_reserve(path):
+        scan_logger.log(
+            path=path,
+            phase=args.phase,
+            event="job_skipped",
+            message="request skipped because path already completed or in progress",
+        )
+        print(
+            json.dumps(
+                {
+                    "analysis_status": "SKIPPED",
+                    "path": path,
+                    "reason": "path already completed or in progress",
+                    "findings": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
 
-    if args.phase == "triage":
-        out = agent.triage(data)
-    elif args.phase == "probe":
-        out = agent.probe(data, active=args.active)
-    elif args.phase == "deep":
-        probe = agent.probe(data, active=args.active)
-        out = agent.deep_analysis(data, probe)
-    else:
-        probe = agent.probe(data, active=args.active)
-        analysis = agent.deep_analysis(data, probe)
-        out = agent.final_exploit(data, analysis)
+    scan_logger.log(path=path, phase=args.phase, event="job_start", message="cli scan started")
+    agent = RedScanAgent(policy_path=args.policy, scan_logger=scan_logger)
+    try:
+        if args.phase == "triage":
+            out = agent.triage(data, path=path)
+        elif args.phase == "probe":
+            out = agent.probe(data, active=args.active, path=path)
+        elif args.phase == "deep":
+            probe = agent.probe(data, active=args.active, path=path)
+            out = agent.deep_analysis(data, probe, path=path, active=args.active)
+        else:
+            probe = agent.probe(data, active=args.active, path=path)
+            analysis = agent.deep_analysis(data, probe, path=path, active=args.active)
+            out = agent.final_exploit(data, analysis, path=path)
 
-    print(json.dumps(out, ensure_ascii=False, indent=2))
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        try:
+            artifacts = output_writer.write(data, path, args.phase, out)
+            if artifacts:
+                scan_logger.log(
+                    path=path,
+                    phase=args.phase,
+                    event="artifacts_written",
+                    message=f"artifacts generated count={len(artifacts)} files={artifacts}",
+                )
+        except Exception as e:
+            scan_logger.log(
+                path=path,
+                phase=args.phase,
+                event="artifacts_error",
+                message=f"artifact generation failed: {e}",
+            )
+    except Exception:
+        path_tracker.mark_failed(path)
+        raise
+    try:
+        path_tracker.mark_completed(path)
+    except Exception as e:
+        path_tracker.mark_failed(path)
+        scan_logger.log(
+            path=path,
+            phase=args.phase,
+            event="path_mark_error",
+            message=f"path complete mark failed: {e}",
+        )
+    scan_logger.log(path=path, phase=args.phase, event="job_end", message="cli scan completed")
 
 
 if __name__ == "__main__":
