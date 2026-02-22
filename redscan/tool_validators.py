@@ -90,6 +90,14 @@ def run_commix(req, vector: str, timeout_sec: int = 45) -> ToolValidationResult:
         cmd.extend(["--data", body_text])
     if headers.get("Cookie"):
         cmd.extend(["--cookie", headers.get("Cookie", "")])
+    extra_headers = []
+    for k, v in headers.items():
+        lk = k.lower()
+        if lk in {"host", "content-length", "cookie"}:
+            continue
+        extra_headers.append(f"{k}: {v}")
+    if extra_headers:
+        cmd.extend(["--headers", "\n".join(extra_headers)])
 
     try:
         run = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, shell=False)

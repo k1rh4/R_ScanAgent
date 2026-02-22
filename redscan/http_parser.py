@@ -36,10 +36,19 @@ def _maybe_b64(s: str) -> str:
 
 def _parse_raw_request(raw: str, base_url: str | None = None) -> ParsedRequest:
     raw = _maybe_b64(raw)
-    head, _, body = raw.partition("\r\n\r\n")
-    lines = head.split("\r\n")
-    request_line = lines[0]
-    method, path, _ = request_line.split(" ")
+    if "\r\n\r\n" in raw:
+        head, _, body = raw.partition("\r\n\r\n")
+    else:
+        head, _, body = raw.partition("\n\n")
+    lines = head.splitlines()
+    if not lines:
+        raise ValueError("invalid raw request: missing request line")
+    request_line = lines[0].strip()
+    request_parts = request_line.split()
+    if len(request_parts) < 2:
+        raise ValueError("invalid raw request line")
+    method = request_parts[0]
+    path = request_parts[1]
     headers: Dict[str, str] = {}
     for line in lines[1:]:
         if not line.strip():
@@ -69,9 +78,12 @@ def _parse_raw_request(raw: str, base_url: str | None = None) -> ParsedRequest:
 
 def _parse_raw_response(raw: str) -> ParsedResponse:
     raw = _maybe_b64(raw)
-    head, _, body = raw.partition("\r\n\r\n")
-    lines = head.split("\r\n")
-    status_line = lines[0]
+    if "\r\n\r\n" in raw:
+        head, _, body = raw.partition("\r\n\r\n")
+    else:
+        head, _, body = raw.partition("\n\n")
+    lines = head.splitlines()
+    status_line = lines[0] if lines else ""
     try:
         status_code = int(status_line.split(" ")[1])
     except Exception:

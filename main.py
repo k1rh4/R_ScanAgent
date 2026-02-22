@@ -31,7 +31,8 @@ def main():
     scan_logger = ScanLogger(os.getenv("REDSCAN_SCAN_LOG", "scan.log"))
     output_writer = OutputWriter(os.getenv("REDSCAN_OUTPUT_DIR", "output"))
     path = path_tracker.extract_path(data)
-    if not path_tracker.try_reserve(path):
+    dedupe_key = path_tracker.extract_dedupe_key(data)
+    if not path_tracker.try_reserve(dedupe_key):
         scan_logger.log(
             path=path,
             phase=args.phase,
@@ -85,12 +86,12 @@ def main():
                 message=f"artifact generation failed: {e}",
             )
     except Exception:
-        path_tracker.mark_failed(path)
+        path_tracker.mark_failed(dedupe_key)
         raise
     try:
-        path_tracker.mark_completed(path)
+        path_tracker.mark_completed(dedupe_key)
     except Exception as e:
-        path_tracker.mark_failed(path)
+        path_tracker.mark_failed(dedupe_key)
         scan_logger.log(
             path=path,
             phase=args.phase,

@@ -29,6 +29,14 @@ class CompletedPathTracker:
         parsed = urlparse(req.url)
         return parsed.path or "/"
 
+    def extract_dedupe_key(self, data: dict) -> str:
+        req, _ = parse_burp_json(data)
+        parsed = urlparse(req.url)
+        method = (req.method or "").upper()
+        host = parsed.netloc or req.headers.get("Host", "")
+        path = parsed.path or "/"
+        return f"{method} {host}{path}"
+
     def is_completed(self, path: str) -> bool:
         with self._lock:
             return path in self._completed

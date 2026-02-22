@@ -1,3 +1,5 @@
+![Gemini Architecture](gemini_architecture.png)
+
 # RedScan
 
 Burp Suite HTTP History(JSON) 기반으로 치명적 취약점만을 선별/검증하는 자동화 에이전트.
@@ -131,7 +133,7 @@ curl http://localhost:8000/result/<job_id>
 ### 1) Python 패키지
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate  # Windows PowerShell: .venv\\Scripts\\Activate.ps1
 pip install -r requirements.txt
 ```
@@ -154,9 +156,9 @@ pip install sqlmap
 ## 실행 예시
 
 ```bash
-python main.py --input burp_packet.json --phase probe
-python main.py --input burp_packet.json --phase deep --active
-python main.py --input burp_packet.json --phase final --active
+python3 main.py --input burp_packet.json --phase probe
+python3 main.py --input burp_packet.json --phase deep --active
+python3 main.py --input burp_packet.json --phase final --active
 ```
 
 ## 탐지 품질 개선 포인트 (내장)
@@ -169,7 +171,7 @@ python main.py --input burp_packet.json --phase final --active
 ## 설정
 
 - `custom_policy.txt` 내용을 시스템 메시지에 병합하여 탐침 우선순위를 커스텀합니다.
-- 동일 path 중복 진단 방지: 진단 완료 path는 `complete_path.log`(기본값)에 기록되며, 이후 동일 path 요청은 `SKIPPED`로 반환됩니다.
+- 중복 진단 방지: 완료 키(`METHOD host/path`)는 `complete_path.log`(기본값)에 기록되며, 이후 동일 키 요청은 `SKIPPED`로 반환됩니다.
 - 진행 로그: `scan.log`에 JSON Lines 형태로 실시간 기록되며, path별 `no` 번호로 후보/검증 진행 상태를 추적할 수 있습니다.
 - `scan.log`는 크기 제한 기반 로테이션을 지원합니다 (`scan.log.1`, `scan.log.2` ...).
 - 취약점 산출물: `VERIFIED` 결과가 있으면 `output/<path>/` 아래에 `report.md`와 실행 가능한 `exploit_*` 파일이 생성됩니다.

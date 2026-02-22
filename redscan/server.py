@@ -37,6 +37,7 @@ class Job:
     id: str
     request: ScanRequest
     path: str
+    dedupe_key: str
     created_at: float
 
 
@@ -88,6 +89,7 @@ async def _worker(worker_id: int):
         job = await queue.get()
         req = job.request
         path = job.path
+        dedupe_key = job.dedupe_key
         try:
             _prune_results()
             scan_logger.log(
@@ -127,7 +129,7 @@ async def _worker(worker_id: int):
 
             _set_result(job.id, ScanResult(status="done", result=out))
             try:
-                path_tracker.mark_completed(path)
+                path_tracker.mark_completed(dedupe_key)
             except Exception as e:
                 scan_logger.log(
                     path=path,
@@ -144,7 +146,7 @@ async def _worker(worker_id: int):
         except Exception as e:
             _set_result(job.id, ScanResult(status="error", error=str(e)))
             try:
-                path_tracker.mark_failed(path)
+                path_tracker.mark_failed(dedupe_key)
             except Exception:
                 pass
             try:
@@ -184,10 +186,11 @@ async def scan(req: ScanRequest):
     _prune_results()
     try:
         path = path_tracker.extract_path(req.data)
+        dedupe_key = path_tracker.extract_dedupe_key(req.data)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"invalid packet data: {e}") from e
 
-    if not path_tracker.try_reserve(path):
+    if not path_tracker.try_reserve(dedupe_key):
         scan_logger.log(
             path=path,
             phase=req.phase,
@@ -210,10 +213,10 @@ async def scan(req: ScanRequest):
 
     _set_result(job_id, ScanResult(status="queued"))
     try:
-        queue.put_nowait(Job(id=job_id, request=req, path=path, created_at=time.time()))
+        queue.put_nowait(Job(id=job_id, request=req, path=path, dedupe_key=dedupe_key, created_at=time.time()))
     except asyncio.QueueFull:
         try:
-            path_tracker.mark_failed(path)
+            path_tracker.mark_failed(dedupe_key)
         except Exception:
             pass
         _set_result(job_id, ScanResult(status="error", error="queue full"))

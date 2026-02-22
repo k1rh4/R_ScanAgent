@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import stat
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -38,6 +39,32 @@ class OutputWriter:
 
     def _shell_quote(self, value: str) -> str:
         return "'" + value.replace("'", "'\"'\"'") + "'"
+
+    def _atomic_write_text(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            Path(tmp_path).replace(path)
+        finally:
+            if tmp_path and Path(tmp_path).exists():
+                try:
+                    Path(tmp_path).unlink()
+                except Exception:
+                    pass
+
+    def _atomic_write_executable_text(self, path: Path, content: str) -> None:
+        self._atomic_write_text(path, content)
+        self._chmod_exec(path)
 
     def _build_sqlmap_script(self, raw_request: str, param: str) -> str:
         quoted_param = self._shell_quote(param)
@@ -113,8 +140,7 @@ class OutputWriter:
                 param = vector.split("/", 1)[0]
                 script_path = out_dir / f"exploit_{i}_sqli.sh"
                 script_body = self._build_sqlmap_script(req.raw, param)
-                script_path.write_text(script_body, encoding="utf-8")
-                self._chmod_exec(script_path)
+                self._atomic_write_executable_text(script_path, script_body)
                 artifacts.append(script_path.as_posix())
             elif tool == "python_script" and isinstance(payload, str) and payload.strip():
                 # Final phase payload already contains executable python script.
@@ -131,8 +157,7 @@ class OutputWriter:
 
             if script_body and script_path is None:
                 script_path = out_dir / f"exploit_{i}.py"
-                script_path.write_text(self._build_python_script(script_body), encoding="utf-8")
-                self._chmod_exec(script_path)
+                self._atomic_write_executable_text(script_path, self._build_python_script(script_body))
                 artifacts.append(script_path.as_posix())
 
             if script_path and script_body:
@@ -158,6 +183,6 @@ class OutputWriter:
                 )
 
         report_md_path = out_dir / "report.md"
-        report_md_path.write_text("\n".join(md_lines), encoding="utf-8")
+        self._atomic_write_text(report_md_path, "\n".join(md_lines))
         artifacts.append(report_md_path.as_posix())
         return artifacts
