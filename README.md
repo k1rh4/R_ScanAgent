@@ -6,27 +6,32 @@ Burp Suite HTTP History(JSON) 기반으로 치명적 취약점만을 선별/검�
 
 ## 구조 요약
 
-1) 후보 추출 (Candidate Discovery)
-- 요청의 query/body/cookie/header 이름 힌트와 경로 힌트를 기반으로 후보를 생성합니다.
-- 대상 유형은 SQL Injection, Command Injection, Path Traversal, Unrestricted File Upload/Download입니다.
+1. 후보 추출: 파라미터명/경로 힌트 기반 정적 후보 생성 (`redscan/candidates.py:42`)
+2. 프로빙: 페이로드 주입 후 응답 차이(status/len/time/similarity/hint) 수집 (`redscan/probing.py:193`, `redscan/probing.py:149`)
+3. 딥 분석: 휴리스틱으로 VERIFIED/DISCARDED 판정 (`redscan/agent.py:341`)
+4. 보조 검증: 필요 시 commix/ffuf/sqlmap 실행 (`redscan/agent.py:217`, `redscan/agent.py:271`)
 
-2) 프로빙 (Probe)
-- 후보 파라미터에 유형별 페이로드를 주입해 baseline 대비 응답 변화를 수집합니다.
-- 증거는 상태코드/응답 길이/시간 차이/유사도/키워드 힌트로 기록됩니다.
+### LLM이 실제로 쓰이는 기준 (2군데)
 
-3) 딥 분석 (Deep Analysis)
-- 1차 최종 판정은 휴리스틱 기반입니다.
-- 예: `time_delta >= 1.5s`, DB 오류 키워드, `uid=/gid=/whoami`, `/etc/hosts`, `verified=content_match` 등.
+1. 비싼 도구 실행 게이트  
+   HIGH/LOW만 반환하게 해서 commix/ffuf 실행 여부 결정 (`redscan/agent.py:197`)
+2. 다운그레이드 전용 검토  
+   이미 VERIFIED 된 건에 대해 근거 부족이면 DISCARDED로만 낮춤 (`redscan/agent.py:365`)
 
-4) 외부 도구 검증 (선택)
-- SQLi는 final 단계에서 `sqlmap`으로 재검증합니다.
-- Command Injection은 `commix`, Path Traversal/Download는 `ffuf`로 프리검증할 수 있습니다.
+### 즉, 취약점 판정 기준의 본체
 
-5) LLM 역할 (보조)
-- LLM은 탐지의 본체가 아니라 보조 판단입니다.
-- 용도 A: 외부 도구 실행 전 `HIGH/LOW` 게이트 판단.
-- 용도 B: 이미 `VERIFIED`인 결과를 근거 부족 시 `DISCARDED`로만 다운그레이드.
-- API 키가 없으면 LLM 경로는 비활성화되고 규칙/도구 기반으로만 동작합니다.
+- `time_delta >= 1.5s`면 검증 성공 (`redscan/agent.py:345`)
+- 응답에 DB 에러/엔진 토큰(sql, mysql, postgres 등) 있으면 성공 (`redscan/agent.py:355`)
+- Command Injection은 `uid=`, `gid=`, `whoami` 힌트 (`redscan/agent.py:357`)
+- Traversal/Download는 `/etc/hosts` 힌트 (`redscan/agent.py:359`)
+- Upload는 `verified=content_match` (`redscan/agent.py:361`)
+- 반대로 `error` 포함 시 폐기 (`redscan/agent.py:343`)
+
+### 중요 포인트
+
+- API 키 없으면 LLM 경로는 사실상 비활성 (`redscan/llm.py:46`)
+- 시스템 프롬프트는 “치명적 5종만”에 초점 (`redscan/agent.py:39`)
+- 커스텀 정책(`custom_policy.txt`)은 프롬프트에 붙고, 일부 페이로드 선택(id/whoami, SQL error/time)에도 영향 (`redscan/policies.py:18`)
 
 ## 설치 가이드
 
