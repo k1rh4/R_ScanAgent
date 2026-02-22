@@ -4,6 +4,30 @@
 
 Burp Suite HTTP History(JSON) 기반으로 치명적 취약점만을 선별/검증하는 자동화 에이전트.
 
+## 구조 요약
+
+1) 후보 추출 (Candidate Discovery)
+- 요청의 query/body/cookie/header 이름 힌트와 경로 힌트를 기반으로 후보를 생성합니다.
+- 대상 유형은 SQL Injection, Command Injection, Path Traversal, Unrestricted File Upload/Download입니다.
+
+2) 프로빙 (Probe)
+- 후보 파라미터에 유형별 페이로드를 주입해 baseline 대비 응답 변화를 수집합니다.
+- 증거는 상태코드/응답 길이/시간 차이/유사도/키워드 힌트로 기록됩니다.
+
+3) 딥 분석 (Deep Analysis)
+- 1차 최종 판정은 휴리스틱 기반입니다.
+- 예: `time_delta >= 1.5s`, DB 오류 키워드, `uid=/gid=/whoami`, `/etc/hosts`, `verified=content_match` 등.
+
+4) 외부 도구 검증 (선택)
+- SQLi는 final 단계에서 `sqlmap`으로 재검증합니다.
+- Command Injection은 `commix`, Path Traversal/Download는 `ffuf`로 프리검증할 수 있습니다.
+
+5) LLM 역할 (보조)
+- LLM은 탐지의 본체가 아니라 보조 판단입니다.
+- 용도 A: 외부 도구 실행 전 `HIGH/LOW` 게이트 판단.
+- 용도 B: 이미 `VERIFIED`인 결과를 근거 부족 시 `DISCARDED`로만 다운그레이드.
+- API 키가 없으면 LLM 경로는 비활성화되고 규칙/도구 기반으로만 동작합니다.
+
 ## 설치 가이드
 
 ### Docker (Ubuntu 24.04 기반, API 서버)
