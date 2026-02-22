@@ -1,0 +1,2 @@
+모든 Command Injection 테스트 시 cat /etc/passwd 대신 id 또는 whoami를 우선 사용하여 탐지 여부만 확인해라.
+SQL Injection의 경우 error-based를 먼저 시도하고 응답에 데이터베이스 엔진 이름이 포함되는지 확인해라.
