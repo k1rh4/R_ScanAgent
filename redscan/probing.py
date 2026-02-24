@@ -159,6 +159,8 @@ def _payload_for(vuln_type: str, policy: Policy) -> str:
         return _download_probe()
     if vuln_type == "Unrestricted File Upload":
         return "<FILE>"
+    if vuln_type == "IDOR":
+        return "<ID_MUTATION>"
     return ""
 
 
@@ -178,6 +180,8 @@ def _payloads_for(vuln_type: str, policy: Policy) -> List[str]:
         return ["../../../../etc/hosts", "..%2f..%2f..%2f..%2fetc%2fhosts"]
     if vuln_type == "Unrestricted File Upload":
         return ["<FILE>"]
+    if vuln_type == "IDOR":
+        return ["<ID_MUTATION>"]
     return [""]
 
 
@@ -210,12 +214,148 @@ def _diff_evidence(base, probe, base_time: float, probe_time: float) -> str:
     return f"status={status_delta} len={len_delta} time_delta={time_delta:.2f}s similarity={ratio:.2f} hint={hint}"
 
 
+def _auth_hint(body_lower: str) -> str:
+    for token in [
+        "forbidden",
+        "unauthorized",
+        "not authorized",
+        "access denied",
+        "permission denied",
+        "login",
+        "sign in",
+    ]:
+        if token in body_lower:
+            return "denied"
+    return "none"
+
+
+def _snippet(text: str, limit: int = 120) -> str:
+    return " ".join(text.strip().split())[:limit]
+
+
+def _idor_evidence(base, probe, base_time: float, probe_time: float, req_path: str) -> str:
+    if not base or not probe:
+        return json.dumps({"idor": "no_response"})
+    base_text = base.text if hasattr(base, "text") else base.content.decode("utf-8", errors="ignore")
+    probe_text = probe.text if hasattr(probe, "text") else probe.content.decode("utf-8", errors="ignore")
+    ratio = difflib.SequenceMatcher(None, base_text, probe_text).ratio()
+    auth = _auth_hint(probe_text.lower())
+    base_len = len(base.content)
+    probe_len = len(probe.content)
+    len_ratio = (probe_len / base_len) if base_len else 0.0
+    payload = {
+        "idor": "compare",
+        "status_base": base.status_code,
+        "status_probe": probe.status_code,
+        "len_base": base_len,
+        "len_probe": probe_len,
+        "len_ratio": round(len_ratio, 2),
+        "similarity": round(ratio, 2),
+        "auth_hint": auth,
+        "base_snip": _snippet(base_text),
+        "probe_snip": _snippet(probe_text),
+        "path": req_path,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _find_multipart_file_field(body: bytes) -> str | None:
     text = body.decode("utf-8", errors="ignore")
     match = re.search(r'name="([^"]+)";\\s*filename="[^"]*"', text, re.IGNORECASE)
     if match:
         return match.group(1)
     return None
+
+
+def _get_nested_json_value(obj, path: str):
+    parts = [p for p in path.split(".") if p]
+    cur = obj
+    for part in parts:
+        if isinstance(cur, list) and part.isdigit():
+            idx = int(part)
+            if idx >= len(cur):
+                return None
+            cur = cur[idx]
+        elif isinstance(cur, dict):
+            if part not in cur:
+                return None
+            cur = cur[part]
+        else:
+            return None
+    return cur
+
+
+def _current_value(req, location: str, name: str) -> str | None:
+    if location == "query":
+        values = req.query.get(name)
+        if values:
+            return str(values[0])
+        return None
+    if location == "body":
+        ctype = req.headers.get("Content-Type", "")
+        if "application/json" in ctype:
+            try:
+                obj = json.loads(req.body.decode("utf-8", errors="ignore"))
+                val = _get_nested_json_value(obj, name)
+                return None if val is None else str(val)
+            except Exception:
+                return None
+        if "application/x-www-form-urlencoded" in ctype:
+            decoded = req.body.decode("utf-8", errors="ignore")
+            for pair in decoded.split("&"):
+                if "=" not in pair:
+                    continue
+                k, v = pair.split("=", 1)
+                if k == name:
+                    return v
+        return None
+    if location == "cookie":
+        cookie = req.headers.get("Cookie", "")
+        for kv in cookie.split(";"):
+            if "=" not in kv:
+                continue
+            k, v = kv.split("=", 1)
+            if k.strip() == name:
+                return v.strip()
+        return None
+    if location == "header":
+        return req.headers.get(name)
+    return None
+
+
+def _mutate_id(value: str) -> List[str]:
+    if value is None:
+        return ["2", "3"]
+    if re.fullmatch(r"\d+", value):
+        n = int(value)
+        return [str(n + 1), str(n + 2)]
+    if re.fullmatch(r"[0-9a-fA-F-]{32,36}", value):
+        # flip last hex char
+        last = value[-1]
+        repl = "0" if last.lower() != "0" else "1"
+        return [value[:-1] + repl]
+    m = re.search(r"(\d+)", value)
+    if m:
+        n = int(m.group(1))
+        return [value[: m.start(1)] + str(n + 1) + value[m.end(1) :]]
+    return [value + "1"]
+
+
+def _mutate_path(path: str) -> List[str]:
+    segments = path.split("/")
+    for i in range(len(segments) - 1, -1, -1):
+        seg = segments[i]
+        if re.fullmatch(r"\d+", seg) or re.fullmatch(r"[0-9a-fA-F-]{32,36}", seg):
+            for v in _mutate_id(seg):
+                copy = segments[:]
+                copy[i] = v
+                return ["/".join(copy)]
+    # fallback: try replace first numeric substring
+    m = re.search(r"(\d+)", path)
+    if m:
+        n = int(m.group(1))
+        return [path[: m.start(1)] + str(n + 1) + path[m.end(1) :]]
+    return []
 
 
 def _extract_upload_url(text: str) -> str | None:
@@ -246,6 +386,8 @@ def probe_candidates(req, candidates, policy: Policy, active: bool = False) -> L
 
         if c.vuln_type == "SQL Injection":
             tool = "sqlmap"
+        if c.vuln_type == "IDOR":
+            tool = "python_script"
 
         if not active:
             results.append(
@@ -281,12 +423,39 @@ def probe_candidates(req, candidates, policy: Policy, active: bool = False) -> L
                         )
                     )
                 continue
+            if c.vuln_type == "IDOR":
+                req_path = urlparse(req.url).path or "/"
+                if c.location == "path":
+                    payloads = _mutate_path(req_path)
+                    if not payloads:
+                        results.append(
+                            ProbeResult(
+                                str(uuid.uuid4()),
+                                c.vuln_type,
+                                f"{c.param}/{c.location}",
+                                c.reason,
+                                tool,
+                                "",
+                                status,
+                                "idor=skipped reason=no_mutation path_hint=" + req_path,
+                            )
+                        )
+                        continue
+                else:
+                    cur = _current_value(req, c.location, c.param)
+                    payloads = _mutate_id(cur)
             for p in payloads:
                 pid = str(uuid.uuid4())
-                url, headers, body = _apply_param(req, c.location, c.param, p)
+                if c.vuln_type == "IDOR" and c.location == "path":
+                    url, headers, body = _apply_param(req, "path", c.param, p)
+                else:
+                    url, headers, body = _apply_param(req, c.location, c.param, p)
                 try:
                     r, elapsed = _send(req, url, headers, body)
-                    evidence = _diff_evidence(base_r, r, base_t, elapsed)
+                    if c.vuln_type == "IDOR":
+                        evidence = _idor_evidence(base_r, r, base_t, elapsed, urlparse(req.url).path or "/")
+                    else:
+                        evidence = _diff_evidence(base_r, r, base_t, elapsed)
                 except Exception as e:
                     evidence = f"error={e}"
                 if path_hint:

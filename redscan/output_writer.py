@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
 import stat
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any, Dict, List
 
 from .candidates import Candidate
@@ -98,6 +100,61 @@ class OutputWriter:
             body = "#!/usr/bin/env python3\n" + body
         return body + "\n"
 
+    def _evidence_json(self, evidence: str) -> Dict[str, Any] | None:
+        if not evidence:
+            return None
+        text = evidence.strip()
+        if not text.startswith("{"):
+            return None
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def _idor_summary(self, evidence: str) -> str:
+        data = self._evidence_json(evidence)
+        if data:
+            parts = []
+            status_base = data.get("status_base")
+            status_probe = data.get("status_probe")
+            if status_base is not None or status_probe is not None:
+                parts.append(f"{status_base}->{status_probe}")
+            if "similarity" in data:
+                parts.append(f"sim={data.get('similarity')}")
+            if "len_ratio" in data:
+                parts.append(f"len_ratio={data.get('len_ratio')}")
+            if "auth_hint" in data:
+                parts.append(f"auth={data.get('auth_hint')}")
+            return " ".join(parts)
+
+        def _pick(pattern: str, default: str = "") -> str:
+            m = re.search(pattern, evidence)
+            return m.group(1) if m else default
+
+        status_base = _pick(r"status_base=(\d+)")
+        status_probe = _pick(r"status_probe=(\d+)")
+        similarity = _pick(r"similarity=([0-9.]+)")
+        len_ratio = _pick(r"len_ratio=([0-9.]+)")
+        auth_hint = _pick(r"auth_hint=([a-z_]+)")
+        parts = []
+        if status_base or status_probe:
+            parts.append(f"{status_base}->{status_probe}")
+        if similarity:
+            parts.append(f"sim={similarity}")
+        if len_ratio:
+            parts.append(f"len_ratio={len_ratio}")
+        if auth_hint:
+            parts.append(f"auth={auth_hint}")
+        return " ".join(parts)
+
+    def _path_hint(self, evidence: str) -> str:
+        data = self._evidence_json(evidence)
+        if data and "path" in data:
+            return str(data.get("path") or "")
+        m = re.search(r"path_hint=([^\\s]+)", evidence)
+        return m.group(1) if m else ""
+
     def write(self, data: dict, path: str, phase: str, result: Dict[str, Any]) -> List[str]:
         findings = result.get("findings", []) if isinstance(result, dict) else []
         verified = [f for f in findings if f.get("analysis_status") == "VERIFIED"]
@@ -112,9 +169,14 @@ class OutputWriter:
         report_md_path = self.base_dir / "report.md"
         exploit_index = self._next_exploit_index()
 
+        parsed_url = urlparse(req.url)
+        host = parsed_url.netloc or "unknown"
+        full_url = req.url or ""
         section_lines = [
             f"## 스캔 대상: `{path}`",
             "",
+            f"- 호스트: {host}",
+            f"- URL: {full_url}",
             f"- 생성 시각: {timestamp}",
             f"- 분석 단계: {phase}",
             f"- 검증된 취약점 수: {len(verified)}",
@@ -136,6 +198,8 @@ class OutputWriter:
                     f"- 벡터: {vector}",
                     f"- 확인 도구: {tool}",
                     f"- 취약점 판단 이유: {reason}",
+                    *([f"- 경로: {self._path_hint(evidence)}"] if vector.endswith("/path") and self._path_hint(evidence) else []),
+                    *([f"- IDOR 요약: {self._idor_summary(evidence)}"] if vtype == "IDOR" else []),
                     f"- 검증 근거: {evidence}",
                     "",
                 ]

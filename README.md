@@ -53,7 +53,7 @@ Burp Suite HTTP History(JSON) 기반으로 치명적 취약점만 선별/검증�
 - SQLi는 `sqlmap -r <raw_request>`로 최종 검증합니다.
 - 그 외 유형은 재현용 Python exploit 스크립트를 생성합니다.
 
-## LLM이 쓰이는 시점 (현재 코드상 3곳)
+## LLM이 쓰이는 시점 (현재 코드상 4곳)
 
 1. 후보 우선순위 선정
 - 요청 surface를 기반으로 JSON 후보 집합을 생성합니다.
@@ -63,6 +63,9 @@ Burp Suite HTTP History(JSON) 기반으로 치명적 취약점만 선별/검증�
 
 3. 다운그레이드 전용 검토
 - 이미 `VERIFIED`인 결과를 `DISCARDED`로 낮출지 판단합니다.
+
+4. IDOR 판정
+- IDOR 프로빙 응답을 기반으로 `VERIFIED`/`DISCARDED`를 보수적으로 판단합니다.
 
 ## 사용 Tool 맵
 

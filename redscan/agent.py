@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -41,16 +43,16 @@ class RedScanAgent:
     def _system_message(self) -> str:
         base = (
             "You are an autonomous red-team agent. Focus only on critical vulnerabilities: "
-            "SQL Injection, Command Injection, Path Traversal, Unrestricted File Upload/Download."
+            "SQL Injection, Command Injection, Path Traversal, Unrestricted File Upload/Download, IDOR."
         )
         if self.policy.text:
             return base + "\nCustom policy:\n" + self.policy.text
         return base
 
     def triage(self, data: dict, path: str | None = None) -> Dict[str, Any]:
-        req, _ = parse_burp_json(data)
+        req, res = parse_burp_json(data)
         scan_path = path or req.url.split("?", 1)[0]
-        candidates = discover_candidates_prioritized(req, self.llm, max_candidates=self.max_candidates)
+        candidates = discover_candidates_prioritized(req, self.llm, max_candidates=self.max_candidates, res=res)
         if self.scan_logger:
             self.scan_logger.log(
                 path=scan_path,
@@ -90,9 +92,9 @@ class RedScanAgent:
         return {"analysis_status": "PROBING", "findings": findings}
 
     def probe(self, data: dict, active: bool = False, path: str | None = None) -> Dict[str, Any]:
-        req, _ = parse_burp_json(data)
+        req, res = parse_burp_json(data)
         scan_path = path or req.url.split("?", 1)[0]
-        candidates = discover_candidates_prioritized(req, self.llm, max_candidates=self.max_candidates)
+        candidates = discover_candidates_prioritized(req, self.llm, max_candidates=self.max_candidates, res=res)
         if self.scan_logger:
             self.scan_logger.log(
                 path=scan_path,
@@ -173,6 +175,8 @@ class RedScanAgent:
                         message=f"tool={tool_name} status={tool_status} cmd={tool_cmd}",
                     )
 
+            if f.get("type") == "IDOR" and self.llm.available():
+                status = self._llm_idor_verdict(f, evidence, status)
             if self.llm.available() and status == "VERIFIED":
                 status = self._llm_downgrade_only(f, evidence, status)
             findings.append({**f, "analysis_status": status, "verification_evidence": evidence})
@@ -353,6 +357,22 @@ class RedScanAgent:
         is_path_like = vuln_type in {"Path Traversal", "Unrestricted File Download"}
         if "error" in e and not is_path_like:
             return "DISCARDED"
+        if vuln_type == "IDOR":
+            try:
+                data = {}
+                if evidence.strip().startswith("{"):
+                    data = json.loads(evidence)
+                s = int(data.get("status_probe", 0)) if data else 0
+                auth_hint = str(data.get("auth_hint", ""))
+                if s in {401, 403} or auth_hint == "denied":
+                    return "DISCARDED"
+                sim = float(data.get("similarity", 0.0))
+                ratio = float(data.get("len_ratio", 0.0))
+                if s in {200, 201} and sim >= 0.7 and 0.5 <= ratio <= 1.5 and auth_hint == "none":
+                    return "VERIFIED"
+            except Exception:
+                pass
+            return "DISCARDED"
         if "time_delta" in e:
             # try to parse time_delta
             try:
@@ -374,6 +394,31 @@ class RedScanAgent:
         if vuln_type == "Unrestricted File Upload" and "verified=content_match" in e:
             return "VERIFIED"
         return "DISCARDED"
+
+    def _llm_idor_verdict(self, finding: Dict[str, Any], evidence: str, current: str) -> str:
+        system = (
+            "You are a strict but high-sensitivity IDOR (Insecure Direct Object Reference) classifier. "
+            "Favor VERIFIED only when the evidence strongly suggests unauthorized access without explicit denial. "
+            "Treat 2xx responses with similar content/length and auth_hint=none as likely IDOR. "
+            "If there is any clear denial (401/403 or auth_hint=denied), return DISCARDED. "
+            "If evidence is ambiguous, return DISCARDED."
+        )
+        user = (
+            "Return only one token: VERIFIED or DISCARDED.\n"
+            f"type={finding.get('type')}\n"
+            f"vector={finding.get('vector')}\n"
+            f"reasoning={finding.get('reasoning')}\n"
+            f"evidence={evidence}\n"
+        )
+        try:
+            resp = self.llm.chat(system, user).strip().upper()
+            if "VERIFIED" in resp:
+                return "VERIFIED"
+            if "DISCARDED" in resp:
+                return "DISCARDED"
+        except Exception:
+            return current
+        return current
 
     def _llm_downgrade_only(self, finding: Dict[str, Any], evidence: str, current: str) -> str:
         system = self._system_message()

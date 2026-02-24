@@ -13,6 +13,7 @@ CRITICAL_TYPES = [
     "Path Traversal",
     "Unrestricted File Upload",
     "Unrestricted File Download",
+    "IDOR",
 ]
 
 
@@ -67,7 +68,21 @@ def _parse_cookie_params(cookie: str) -> Dict[str, str]:
     return out
 
 
-def _request_surface(req) -> Dict[str, Any]:
+def _response_summary(res) -> Dict[str, Any]:
+    if not res:
+        return {}
+    ctype = res.headers.get("Content-Type", "")
+    body = res.body.decode("utf-8", errors="ignore")
+    snippet = " ".join(body.strip().split())[:400]
+    return {
+        "status": res.status_code,
+        "content_type": ctype,
+        "length": len(res.body),
+        "snippet": snippet,
+    }
+
+
+def _request_surface(req, res=None) -> Dict[str, Any]:
     parsed = urlparse(req.url)
     body_json = _guess_json_params(req.body)
     body_form = _guess_form_params(req.body)
@@ -80,7 +95,7 @@ def _request_surface(req) -> Dict[str, Any]:
             body_paths = body_json
     elif "application/x-www-form-urlencoded" in ctype and body_form:
         body_paths = body_form
-    return {
+    surface = {
         "method": req.method,
         "url": req.url,
         "path": parsed.path or "/",
@@ -90,6 +105,10 @@ def _request_surface(req) -> Dict[str, Any]:
         "header_names": sorted(k for k in req.headers.keys() if k.lower() not in {"host", "content-length"}),
         "content_type": ctype,
     }
+    res_summary = _response_summary(res)
+    if res_summary:
+        surface["response"] = res_summary
+    return surface
 
 
 def _extract_json(raw: str) -> Any:
@@ -166,6 +185,7 @@ def discover_candidates_rules(req) -> List[Candidate]:
         "Path Traversal": ["file", "path", "dir", "download", "name"],
         "Unrestricted File Upload": ["file", "upload", "image", "avatar", "document"],
         "Unrestricted File Download": ["file", "download", "path", "name"],
+        "IDOR": ["id", "user", "user_id", "account", "account_id", "order", "order_id", "doc", "project", "team"],
     }
 
     # Query params
@@ -178,6 +198,7 @@ def discover_candidates_rules(req) -> List[Candidate]:
         "Path Traversal": ["file", "download", "export"],
         "Unrestricted File Upload": ["upload", "import"],
         "Unrestricted File Download": ["download", "export", "file"],
+        "IDOR": ["user", "account", "order", "invoice", "profile", "project", "team", "resource"],
     }
 
     for k in req.query.keys():
@@ -248,6 +269,19 @@ def discover_candidates_rules(req) -> List[Candidate]:
         if hk.lower() in ("x-forwarded-for", "referer"):
             candidates.append(Candidate("Command Injection", "header", hk, "Header sometimes passed to command/shell sinks.", 1, "rules"))
 
+    # Path-based ID hints
+    if re.search(r"/\d+(/|$)", parsed_path) or re.search(r"/[0-9a-fA-F-]{32,36}(/|$)", parsed_path):
+        candidates.append(
+            Candidate(
+                "IDOR",
+                "path",
+                "__path__",
+                "URL path contains object identifier-like segment.",
+                3,
+                "rules",
+            )
+        )
+
     # Upload hints
     if "multipart/form-data" in ctype:
         candidates.append(Candidate("Unrestricted File Upload", "body", "multipart", "Multipart upload observed.", 3, "rules"))
@@ -255,18 +289,18 @@ def discover_candidates_rules(req) -> List[Candidate]:
     return sorted(candidates, key=lambda c: c.score, reverse=True)
 
 
-def discover_candidates_prioritized(req, llm_client, max_candidates: int = 9) -> List[Candidate]:
+def discover_candidates_prioritized(req, llm_client, max_candidates: int = 9, res=None) -> List[Candidate]:
     cap = max(1, min(int(max_candidates), 9))
     fallback = discover_candidates_rules(req)
     if not llm_client or not llm_client.available():
         return fallback[:cap]
 
-    surface = _request_surface(req)
+    surface = _request_surface(req, res=res)
     system = (
         "You are a web security candidate selector. "
         "Given an HTTP request attack surface, choose the highest-risk candidates for probing. "
         "Focus only on these vulnerability types: "
-        "SQL Injection, Command Injection, Path Traversal, Unrestricted File Upload, Unrestricted File Download."
+        "SQL Injection, Command Injection, Path Traversal, Unrestricted File Upload, Unrestricted File Download, IDOR."
     )
     user = (
         "Return strict JSON only.\n"
@@ -274,7 +308,7 @@ def discover_candidates_prioritized(req, llm_client, max_candidates: int = 9) ->
         "{\n"
         '  "candidates": [\n'
         "    {\n"
-        '      "vuln_type": one of the 5 allowed strings,\n'
+        '      "vuln_type": one of the 6 allowed strings,\n'
         '      "location": "query" | "body" | "cookie" | "header" | "path",\n'
         '      "param": parameter key (for path always "__path__"),\n'
         '      "priority": integer 1..10,\n'
