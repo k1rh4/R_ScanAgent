@@ -17,8 +17,9 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN python3 -m pip install --no-cache-dir -r /app/requirements.txt
-RUN python3 -m pip install --no-cache-dir commix || true
+
+RUN python3 -m pip install --no-cache-dir --break-system-packages -r /app/requirements.txt
+RUN python3 -m pip install --no-cache-dir --break-system-packages commix || true
 
 COPY . /app
 

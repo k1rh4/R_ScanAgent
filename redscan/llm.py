@@ -26,13 +26,16 @@ def _parse_int_set(value: str | None) -> set[int]:
 
 class LLMClient:
     def __init__(self, provider: str | None = None, model: str | None = None):
-        self.provider = (provider or getenv("LLM_PROVIDER", "gemini")).lower()
+        self.provider = (provider or getenv("LLM_PROVIDER", "openai")).lower()
         self.model = model
         self.timeout = float(getenv("LLM_TIMEOUT", "30"))
         self.retries = int(getenv("LLM_RETRIES", "2"))
         self.backoff = float(getenv("LLM_RETRY_BACKOFF", "0.5"))
         self.backoff_mode = getenv("LLM_RETRY_MODE", "exponential")  # exponential | fixed
         self.retry_statuses = _parse_int_set(getenv("LLM_RETRY_STATUS", "429,500,502,503,504"))
+
+    def _openai_base_url(self) -> str | None:
+        return getenv("OPENAI_BASE_URL") or getenv("LLM_BASE_URL") or "http://localhost:8000/v1"
 
     def _resolve_model(self, provider_model_key: str, provider_default: str) -> str:
         # Priority: explicit arg > provider-specific env > generic env > provider default
@@ -45,7 +48,7 @@ class LLMClient:
 
     def available(self) -> bool:
         if self.provider == "openai":
-            return bool(getenv("OPENAI_API_KEY"))
+            return bool(getenv("OPENAI_API_KEY") or self._openai_base_url())
         if self.provider == "anthropic":
             return bool(getenv("ANTHROPIC_API_KEY"))
         if self.provider == "gemini":
@@ -90,9 +93,10 @@ class LLMClient:
 
     def _openai_chat(self, system_message: str, user_message: str) -> str:
         api_key = getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set")
-        model = self._resolve_model("OPENAI_MODEL", "gpt-4o-mini")
+        base_url = self._openai_base_url()
+        if not api_key and not base_url:
+            raise RuntimeError("OPENAI_API_KEY is not set (or set OPENAI_BASE_URL for local OpenAI-compatible servers)")
+        model = self._resolve_model("OPENAI_MODEL", "gpt-5")
         data = {
             "model": model,
             "messages": [
@@ -101,12 +105,15 @@ class LLMClient:
             ],
             "temperature": 0.1,
         }
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        url = (base_url or "https://api.openai.com/v1").rstrip("/") + "/chat/completions"
         r = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
+            url,
+            headers=headers,
             data=json.dumps(data),
             timeout=self.timeout,
         )

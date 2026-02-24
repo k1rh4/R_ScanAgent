@@ -1,7 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_URL=${BASE_URL:-http://localhost:8000}
+resolve_base_url() {
+  if [[ -n "${BASE_URL:-}" ]]; then
+    echo "$BASE_URL"
+    return 0
+  fi
+
+  local probe_path=${BASE_URL_PROBE_PATH:-/scan}
+  local candidates=(
+    "http://127.0.0.1:8000"
+    "http://localhost:8000"
+    "http://host.docker.internal:8000"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    local status
+    status=$(curl -sS -m 2 -o /dev/null -w '%{http_code}' "$candidate$probe_path" || true)
+    if [[ "$status" == "200" || "$status" == "401" || "$status" == "403" || "$status" == "405" || "$status" == "422" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  echo "Unable to reach RedScan API on '$probe_path'. Set BASE_URL explicitly (e.g. BASE_URL=http://host.docker.internal:8000)." >&2
+  return 1
+}
+
+BASE_URL=$(resolve_base_url)
+echo "Using BASE_URL=$BASE_URL"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is required for parsing JSON in this test."

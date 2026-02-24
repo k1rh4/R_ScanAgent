@@ -29,7 +29,7 @@ Burp Suite HTTP History(JSON) 기반으로 치명적 취약점만을 선별/검�
 
 ### 중요 포인트
 
-- API 키 없으면 LLM 경로는 사실상 비활성 (`redscan/llm.py:46`)
+- `openai` 사용 시 `OPENAI_BASE_URL` 기본값은 `http://localhost:8000/v1` (로컬 OpenAI 호환 서버) (`redscan/llm.py:46`)
 - 시스템 프롬프트는 “치명적 5종만”에 초점 (`redscan/agent.py:39`)
 - 커스텀 정책(`custom_policy.txt`)은 프롬프트에 붙고, 일부 페이로드 선택(id/whoami, SQL error/time)에도 영향 (`redscan/policies.py:18`)
 
@@ -73,9 +73,10 @@ cp .env.example .env
 
 ```env
 # LLM
-LLM_PROVIDER=gemini
-LLM_MODEL=gemini-1.5-pro
-GEMINI_API_KEY=your-gemini-key
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-5
+OPENAI_BASE_URL=http://localhost:8000/v1
+# OPENAI_API_KEY=YOUR_PROXY_API_KEY  # 필요한 경우만
 # provider별 모델 변수(선택): OPENAI_MODEL / ANTHROPIC_MODEL / GEMINI_MODEL
 
 # Server
@@ -141,9 +142,9 @@ curl http://localhost:8000/result/<job_id>
 - `REDSCAN_TOOL_TIMEOUT`: 외부 도구 실행 타임아웃(초, 기본 45)
 - `REDSCAN_SCAN_LOG_MAX_BYTES`: `scan.log` 로테이션 기준 크기(바이트, 기본 10485760)
 - `REDSCAN_SCAN_LOG_BACKUP_COUNT`: `scan.log` 백업 파일 개수(기본 5)
-- `LLM_PROVIDER`: `openai` | `anthropic` | `gemini`
+- `LLM_PROVIDER`: `openai` | `anthropic` | `gemini` (기본 `openai`)
 - `LLM_MODEL`: 공통 모델명(권장, provider별 model env보다 우선순위 낮음)
-- `OPENAI_API_KEY`, `OPENAI_MODEL`
+- `OPENAI_API_KEY`, `OPENAI_BASE_URL` (기본 `http://localhost:8000/v1`), `OPENAI_MODEL` (기본 `gpt-5`)
 - `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`
 - `GEMINI_API_KEY`, `GEMINI_MODEL`
 - `LLM_TIMEOUT`: 요청 타임아웃(초)
