@@ -186,7 +186,7 @@ def _payloads_for(vuln_type: str, policy: Policy) -> List[str]:
 
 
 def _diff_evidence(base, probe, base_time: float, probe_time: float) -> str:
-    if not base or not probe:
+    if base is None or probe is None:
         return "no_response"
     status_delta = f"{base.status_code}->{probe.status_code}"
     len_delta = f"{len(base.content)}->{len(probe.content)}"
@@ -234,7 +234,7 @@ def _snippet(text: str, limit: int = 120) -> str:
 
 
 def _idor_evidence(base, probe, base_time: float, probe_time: float, req_path: str) -> str:
-    if not base or not probe:
+    if base is None or probe is None:
         return json.dumps({"idor": "no_response"})
     base_text = base.text if hasattr(base, "text") else base.content.decode("utf-8", errors="ignore")
     probe_text = probe.text if hasattr(probe, "text") else probe.content.decode("utf-8", errors="ignore")

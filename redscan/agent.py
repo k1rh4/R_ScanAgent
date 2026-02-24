@@ -177,7 +177,7 @@ class RedScanAgent:
 
             if f.get("type") == "IDOR" and self.llm.available():
                 status = self._llm_idor_verdict(f, evidence, status)
-            if self.llm.available() and status == "VERIFIED":
+            if self.llm.available() and status == "VERIFIED" and not self._is_strong_path_signal(f, evidence):
                 status = self._llm_downgrade_only(f, evidence, status)
             findings.append({**f, "analysis_status": status, "verification_evidence": evidence})
             if self.scan_logger:
@@ -198,7 +198,8 @@ class RedScanAgent:
                 event="phase_end",
                 message=f"deep analysis finished (findings={len(findings)})",
             )
-        return {"analysis_status": "VERIFIED", "findings": findings}
+        final_status = "VERIFIED" if any(f.get("analysis_status") == "VERIFIED" for f in findings) else "DISCARDED"
+        return {"analysis_status": final_status, "findings": findings}
 
     def _tool_eligible_by_llm(self, finding: Dict[str, Any], evidence: str) -> bool:
         if not self.llm.available():
@@ -219,6 +220,18 @@ class RedScanAgent:
             return "HIGH" in out
         except Exception:
             return True
+
+    def _is_strong_path_signal(self, finding: Dict[str, Any], evidence: str) -> bool:
+        vtype = finding.get("type", "")
+        vector = finding.get("vector", "")
+        if vtype not in {"Path Traversal", "Unrestricted File Download"}:
+            return False
+        if not vector.endswith("/path"):
+            return False
+        text = f"{finding.get('reasoning', '')} {evidence}".lower()
+        has_traversal = any(t in text for t in ["../", "..\\", "%2e%2e", "%2f", "%5c", "traversal"])
+        has_sensitive = any(t in text for t in ["/etc/passwd", "/etc/hosts", "win.ini", "boot.ini", "root:x:"])
+        return has_traversal and has_sensitive
 
     def _preverify_with_tool(self, req, finding: Dict[str, Any], evidence: str) -> tuple[str, str, str, str]:
         vtype = finding.get("type", "")
@@ -333,7 +346,8 @@ class RedScanAgent:
                 event="phase_end",
                 message=f"final exploit finished (findings={len(findings)})",
             )
-        return {"analysis_status": "VERIFIED", "findings": findings}
+        final_status = "VERIFIED" if any(f.get("analysis_status") == "VERIFIED" for f in findings) else "DISCARDED"
+        return {"analysis_status": final_status, "findings": findings}
 
     def run_sqlmap(self, cmd: List[str]) -> str:
         print("[progress] tool 실행중... tool=sqlmap", file=sys.stderr, flush=True)
