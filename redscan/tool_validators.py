@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from urllib.parse import urlparse
 from urllib.parse import parse_qsl, urlencode
 
 from .http_parser import update_query
@@ -35,6 +36,37 @@ def _update_form_body(body: bytes, name: str, value: str) -> bytes:
     return urlencode(updated).encode("utf-8")
 
 
+def _set_nested_json_value(obj, path: str, value: str) -> None:
+    parts = [p for p in path.split(".") if p]
+    if not parts:
+        return
+    cur = obj
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        next_is_index = i + 1 < len(parts) and parts[i + 1].isdigit()
+        if part.isdigit():
+            idx = int(part)
+            if not isinstance(cur, list):
+                return
+            while len(cur) <= idx:
+                cur.append({} if not next_is_index else [])
+            if last:
+                cur[idx] = value
+                return
+            if not isinstance(cur[idx], (dict, list)):
+                cur[idx] = [] if next_is_index else {}
+            cur = cur[idx]
+            continue
+        if not isinstance(cur, dict):
+            return
+        if last:
+            cur[part] = value
+            return
+        if part not in cur or not isinstance(cur[part], (dict, list)):
+            cur[part] = [] if next_is_index else {}
+        cur = cur[part]
+
+
 def _apply_value(req, location: str, name: str, value: str):
     url = req.url
     headers = dict(req.headers)
@@ -50,7 +82,7 @@ def _apply_value(req, location: str, name: str, value: str):
             except Exception:
                 obj = {}
             if isinstance(obj, dict):
-                obj[name] = value
+                _set_nested_json_value(obj, name, value)
                 body = json.dumps(obj).encode("utf-8")
         elif "application/x-www-form-urlencoded" in ctype:
             body = _update_form_body(body, name, value)
@@ -72,6 +104,10 @@ def _apply_value(req, location: str, name: str, value: str):
         headers["Cookie"] = "; ".join(parts)
     elif location == "header":
         headers[name] = value
+    elif location == "path":
+        parsed = urlparse(url)
+        new_path = value if value.startswith("/") else f"/{value}"
+        url = parsed._replace(path=new_path).geturl()
 
     headers.pop("Content-Length", None)
     headers.pop("Host", None)

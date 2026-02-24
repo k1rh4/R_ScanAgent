@@ -6,32 +6,36 @@ Burp Suite HTTP History(JSON) 기반으로 치명적 취약점만을 선별/검�
 
 ## 구조 요약
 
-1. 후보 추출: 파라미터명/경로 힌트 기반 정적 후보 생성 (`redscan/candidates.py:42`)
-2. 프로빙: 페이로드 주입 후 응답 차이(status/len/time/similarity/hint) 수집 (`redscan/probing.py:193`, `redscan/probing.py:149`)
-3. 딥 분석: 휴리스틱으로 VERIFIED/DISCARDED 판정 (`redscan/agent.py:341`)
-4. 보조 검증: 필요 시 commix/ffuf/sqlmap 실행 (`redscan/agent.py:217`, `redscan/agent.py:271`)
+1. 패킷 파싱: Burp raw request/response를 구조화 (`redscan/http_parser.py:100`)
+2. 후보 선정(LLM 우선): request 표면을 LLM에 전달해 취약점 후보를 우선순위화하고 상위 `< 10`개만 선별 (`redscan/candidates.py:258`, `redscan/agent.py:34`)
+3. 프로빙: 후보별 페이로드 주입 후 응답 차이(status/len/time/similarity/hint) 수집 (`redscan/probing.py:228`)
+4. 딥 분석: 휴리스틱으로 VERIFIED/DISCARDED 판정 (`redscan/agent.py:342`)
+5. 보조 검증: 필요 시 commix/ffuf/sqlmap 실행 (`redscan/agent.py:217`, `redscan/agent.py:271`)
 
-### LLM이 실제로 쓰이는 기준 (2군데)
+### LLM이 실제로 쓰이는 기준 (3군데)
 
-1. 비싼 도구 실행 게이트  
-   HIGH/LOW만 반환하게 해서 commix/ffuf 실행 여부 결정 (`redscan/agent.py:197`)
-2. 다운그레이드 전용 검토  
-   이미 VERIFIED 된 건에 대해 근거 부족이면 DISCARDED로만 낮춤 (`redscan/agent.py:365`)
+1. 후보 선정/우선순위화  
+   request 표면(query/body/cookie/header/path)을 보고 probe 대상 상위 후보를 선택 (`redscan/candidates.py:258`)
+2. 비싼 도구 실행 게이트  
+   HIGH/LOW만 반환하게 해서 commix/ffuf 실행 여부 결정 (`redscan/agent.py:198`)
+3. 다운그레이드 전용 검토  
+   이미 VERIFIED 된 건에 대해 근거 부족이면 DISCARDED로만 낮춤 (`redscan/agent.py:369`)
 
 ### 즉, 취약점 판정 기준의 본체
 
-- `time_delta >= 1.5s`면 검증 성공 (`redscan/agent.py:345`)
-- 응답에 DB 에러/엔진 토큰(sql, mysql, postgres 등) 있으면 성공 (`redscan/agent.py:355`)
-- Command Injection은 `uid=`, `gid=`, `whoami` 힌트 (`redscan/agent.py:357`)
-- Traversal/Download는 `/etc/hosts` 힌트 (`redscan/agent.py:359`)
-- Upload는 `verified=content_match` (`redscan/agent.py:361`)
-- 반대로 `error` 포함 시 폐기 (`redscan/agent.py:343`)
+- `time_delta >= 1.5s`면 검증 성공 (`redscan/agent.py:347`)
+- 응답에 DB 에러/엔진 토큰(sql, mysql, postgres 등) 있으면 성공 (`redscan/agent.py:357`)
+- Command Injection은 `uid=`, `gid=`, `whoami` 힌트 (`redscan/agent.py:359`)
+- Traversal/Download는 `/etc/hosts`, `/etc/passwd`, `root:x:` 힌트 (`redscan/agent.py:361`)
+- Upload는 `verified=content_match` (`redscan/agent.py:365`)
+- 일반 케이스에서 `error` 포함 시 폐기 (`redscan/agent.py:344`)
 
 ### 중요 포인트
 
-- `openai` 사용 시 `OPENAI_BASE_URL` 기본값은 `http://localhost:8000/v1` (로컬 OpenAI 호환 서버) (`redscan/llm.py:46`)
+- `openai` 사용 시 `OPENAI_BASE_URL` 기본값은 `http://localhost:8000/v1` (로컬 OpenAI 호환 서버) (`redscan/llm.py:38`)
 - 시스템 프롬프트는 “치명적 5종만”에 초점 (`redscan/agent.py:39`)
 - 커스텀 정책(`custom_policy.txt`)은 프롬프트에 붙고, 일부 페이로드 선택(id/whoami, SQL error/time)에도 영향 (`redscan/policies.py:18`)
+- `REDSCAN_MAX_LLM_CANDIDATES`로 LLM 후보 상한을 제어하며, 내부적으로 최대 9개(10 미만)로 제한됩니다 (`redscan/agent.py:34`)
 
 ## 설치 가이드
 
@@ -140,6 +144,7 @@ curl http://localhost:8000/result/<job_id>
 - `REDSCAN_ENABLE_COMMIX`: Command Injection 프리검증 사용 여부 (기본 `1`)
 - `REDSCAN_ENABLE_FFUF`: Path Traversal/Download 프리검증 사용 여부 (기본 `1`)
 - `REDSCAN_TOOL_TIMEOUT`: 외부 도구 실행 타임아웃(초, 기본 45)
+- `REDSCAN_MAX_LLM_CANDIDATES`: LLM이 최종 선별하는 후보 개수 상한(기본 `9`, 최대 `9`)
 - `REDSCAN_SCAN_LOG_MAX_BYTES`: `scan.log` 로테이션 기준 크기(바이트, 기본 10485760)
 - `REDSCAN_SCAN_LOG_BACKUP_COUNT`: `scan.log` 백업 파일 개수(기본 5)
 - `LLM_PROVIDER`: `openai` | `anthropic` | `gemini` (기본 `openai`)
@@ -211,6 +216,6 @@ cat samples/cli_stdin_sample.json | python3 main.py --phase probe
 - 중복 진단 방지: 완료 키(`METHOD host/path`)는 `complete_path.log`(기본값)에 기록되며, 이후 동일 키 요청은 `SKIPPED`로 반환됩니다.
 - 진행 로그: `scan.log`에 JSON Lines 형태로 실시간 기록되며, path별 `no` 번호로 후보/검증 진행 상태를 추적할 수 있습니다.
 - `scan.log`는 크기 제한 기반 로테이션을 지원합니다 (`scan.log.1`, `scan.log.2` ...).
-- 취약점 산출물: `VERIFIED` 결과가 있으면 `output/<path>/` 아래에 `report.md`와 실행 가능한 `exploit_*` 파일이 생성됩니다.
-- `report.md`에는 취약점 설명(타입/벡터/근거)과 함께 재현용 exploit 코드가 함께 포함됩니다.
+- 취약점 산출물: `VERIFIED` 결과가 있으면 `output/` 루트에 단일 `report.md`와 실행 가능한 `exploit_*` 파일이 생성됩니다.
+- `report.md`에는 취약점 내용, 취약점으로 판단한 이유, triage용 exploit 파일명이 한글로 기록됩니다.
 - `active=true`일 때 `deep` 단계에서 LLM 게이트 후 `commix/ffuf` 프리검증이 동작합니다(도구 미설치 시 스캔은 중단되지 않고 로그에 `tool_not_installed`로 기록).

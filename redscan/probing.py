@@ -4,7 +4,7 @@ import json
 import re
 import difflib
 import shlex
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 import tempfile
 import time
 import uuid
@@ -34,6 +34,37 @@ def _base_headers(headers: Dict[str, str]) -> Dict[str, str]:
     return {k: v for k, v in headers.items() if k not in blocked}
 
 
+def _set_nested_json_value(obj, path: str, value: str) -> None:
+    parts = [p for p in path.split(".") if p]
+    if not parts:
+        return
+    cur = obj
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        next_is_index = i + 1 < len(parts) and parts[i + 1].isdigit()
+        if part.isdigit():
+            idx = int(part)
+            if not isinstance(cur, list):
+                return
+            while len(cur) <= idx:
+                cur.append({} if not next_is_index else [])
+            if last:
+                cur[idx] = value
+                return
+            if not isinstance(cur[idx], (dict, list)):
+                cur[idx] = [] if next_is_index else {}
+            cur = cur[idx]
+            continue
+        if not isinstance(cur, dict):
+            return
+        if last:
+            cur[part] = value
+            return
+        if part not in cur or not isinstance(cur[part], (dict, list)):
+            cur[part] = [] if next_is_index else {}
+        cur = cur[part]
+
+
 def _apply_param(req, location: str, name: str, value: str):
     url = req.url
     headers = _base_headers(req.headers)
@@ -49,7 +80,7 @@ def _apply_param(req, location: str, name: str, value: str):
             except Exception:
                 obj = {}
             if isinstance(obj, dict):
-                obj[name] = value
+                _set_nested_json_value(obj, name, value)
                 body = json.dumps(obj).encode("utf-8")
         elif "application/x-www-form-urlencoded" in ctype:
             decoded = body.decode("utf-8", errors="ignore")
@@ -82,6 +113,10 @@ def _apply_param(req, location: str, name: str, value: str):
         headers["Cookie"] = "; ".join(kvs)
     elif location == "header":
         headers[name] = value
+    elif location == "path":
+        parsed = urlparse(url)
+        new_path = value if value.startswith("/") else f"/{value}"
+        url = parsed._replace(path=new_path).geturl()
 
     return url, headers, body
 
@@ -207,12 +242,24 @@ def probe_candidates(req, candidates, policy: Policy, active: bool = False) -> L
         status = "PROBING"
         evidence = ""
         tool = "python_script"
+        path_hint = f"path_hint={urlparse(req.url).path}" if c.location == "path" else ""
 
         if c.vuln_type == "SQL Injection":
             tool = "sqlmap"
 
         if not active:
-            results.append(ProbeResult(str(uuid.uuid4()), c.vuln_type, f"{c.param}/{c.location}", c.reason, tool, payload, status, evidence))
+            results.append(
+                ProbeResult(
+                    str(uuid.uuid4()),
+                    c.vuln_type,
+                    f"{c.param}/{c.location}",
+                    c.reason,
+                    tool,
+                    payload,
+                    status,
+                    path_hint,
+                )
+            )
             continue
 
         # Active probing via HTTP replay (lightweight)
@@ -230,7 +277,7 @@ def probe_candidates(req, candidates, policy: Policy, active: bool = False) -> L
                             tool,
                             p,
                             status,
-                            f"error=baseline_failed:{e}",
+                            (f"error=baseline_failed:{e} {path_hint}").strip(),
                         )
                     )
                 continue
@@ -242,6 +289,8 @@ def probe_candidates(req, candidates, policy: Policy, active: bool = False) -> L
                     evidence = _diff_evidence(base_r, r, base_t, elapsed)
                 except Exception as e:
                     evidence = f"error={e}"
+                if path_hint:
+                    evidence = f"{evidence} {path_hint}".strip()
                 results.append(ProbeResult(pid, c.vuln_type, f"{c.param}/{c.location}", c.reason, tool, p, status, evidence))
         else:
             field = _find_multipart_file_field(req.body)

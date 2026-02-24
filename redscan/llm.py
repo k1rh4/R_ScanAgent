@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from typing import Callable, Iterable
 
@@ -56,6 +57,7 @@ class LLMClient:
         return False
 
     def chat(self, system_message: str, user_message: str) -> str:
+        print(f"[progress] LLM에게 요청중... provider={self.provider}", file=sys.stderr, flush=True)
         if self.provider == "openai":
             return self._with_retry(lambda: self._openai_chat(system_message, user_message))
         if self.provider == "anthropic":

@@ -18,16 +18,22 @@ class OutputWriter:
 
     def _safe_segment(self, value: str) -> str:
         cleaned = re.sub(r"[^a-zA-Z0-9._-]", "_", value.strip())
+        if cleaned in {".", ".."}:
+            return "_"
         return cleaned or "_"
 
-    def _path_dir(self, path: str) -> Path:
-        parts = [self._safe_segment(p) for p in path.strip("/").split("/") if p.strip()]
-        if not parts:
-            parts = ["__root__"]
-        out = self.base_dir
-        for part in parts:
-            out = out / part
-        return out
+    def _safe_label(self, value: str, fallback: str) -> str:
+        cleaned = self._safe_segment(value).strip("._-")
+        return cleaned.lower() or fallback
+
+    def _next_exploit_index(self) -> int:
+        max_idx = 0
+        for path in self.base_dir.glob("exploit_*"):
+            match = re.match(r"^exploit_(\d+)", path.name)
+            if not match:
+                continue
+            max_idx = max(max_idx, int(match.group(1)))
+        return max_idx + 1
 
     def _chmod_exec(self, path: Path) -> None:
         try:
@@ -99,18 +105,19 @@ class OutputWriter:
             return []
 
         req, _ = parse_burp_json(data)
-        out_dir = self._path_dir(path)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
 
         artifacts: List[str] = []
         timestamp = datetime.now().isoformat(timespec="seconds")
+        report_md_path = self.base_dir / "report.md"
+        exploit_index = self._next_exploit_index()
 
-        md_lines = [
-            f"# RedScan Report: {path}",
+        section_lines = [
+            f"## 스캔 대상: `{path}`",
             "",
-            f"- generated_at: {timestamp}",
-            f"- phase: {phase}",
-            f"- verified_count: {len(verified)}",
+            f"- 생성 시각: {timestamp}",
+            f"- 분석 단계: {phase}",
+            f"- 검증된 취약점 수: {len(verified)}",
             "",
         ]
 
@@ -123,25 +130,27 @@ class OutputWriter:
             tool = action.get("tool", "")
             payload = action.get("payload", "")
 
-            md_lines.extend(
+            section_lines.extend(
                 [
-                    f"## [{i}] {vtype}",
-                    f"- vector: {vector}",
-                    f"- tool: {tool}",
-                    f"- reason: {reason}",
-                    f"- evidence: {evidence}",
+                    f"### [{i}] {vtype}",
+                    f"- 벡터: {vector}",
+                    f"- 확인 도구: {tool}",
+                    f"- 취약점 판단 이유: {reason}",
+                    f"- 검증 근거: {evidence}",
                     "",
                 ]
             )
 
             script_path: Path | None = None
             script_body = ""
+            vuln_label = self._safe_label(vtype, "vuln")
             if vtype == "SQL Injection":
                 param = vector.split("/", 1)[0]
-                script_path = out_dir / f"exploit_{i}_sqli.sh"
+                script_path = self.base_dir / f"exploit_{exploit_index}_{vuln_label}.sh"
                 script_body = self._build_sqlmap_script(req.raw, param)
                 self._atomic_write_executable_text(script_path, script_body)
                 artifacts.append(script_path.as_posix())
+                exploit_index += 1
             elif tool == "python_script" and isinstance(payload, str) and payload.strip():
                 # Final phase payload already contains executable python script.
                 if "requests.request(" in payload:
@@ -156,33 +165,46 @@ class OutputWriter:
                         script_body = ""
 
             if script_body and script_path is None:
-                script_path = out_dir / f"exploit_{i}.py"
+                script_path = self.base_dir / f"exploit_{exploit_index}_{vuln_label}.py"
                 self._atomic_write_executable_text(script_path, self._build_python_script(script_body))
                 artifacts.append(script_path.as_posix())
+                exploit_index += 1
 
             if script_path and script_body:
-                lang = "bash" if script_path.suffix == ".sh" else "python"
-                md_lines.extend(
+                section_lines.extend(
                     [
-                        f"### Exploit Code (`{script_path.name}`)",
-                        "",
-                        f"```{lang}",
-                        script_body.rstrip(),
-                        "```",
+                        f"- triage exploit 파일: `{script_path.name}`",
                         "",
                     ]
                 )
             elif script_path:
-                md_lines.extend(
+                section_lines.extend(
                     [
-                        f"### Exploit Code (`{script_path.name}`)",
+                        f"- triage exploit 파일: `{script_path.name}`",
+                        "- 비고: 코드 생성은 완료됐지만 본문 표시는 생략됨",
                         "",
-                        "_코드 생성을 완료했지만 본문 임베딩은 생략되었습니다._",
+                    ]
+                )
+            else:
+                section_lines.extend(
+                    [
+                        "- triage exploit 파일: 생성 실패",
+                        "- 비고: action payload를 실행 가능한 코드로 변환하지 못함",
                         "",
                     ]
                 )
 
-        report_md_path = out_dir / "report.md"
-        self._atomic_write_text(report_md_path, "\n".join(md_lines))
+        if report_md_path.exists():
+            existing = report_md_path.read_text(encoding="utf-8").rstrip()
+            report_body = existing + "\n\n---\n\n" + "\n".join(section_lines)
+        else:
+            header = [
+                "# RedScan 취약점 리포트",
+                "",
+                "- 설명: 검증된 취약점과 판단 근거, triage용 exploit 파일명을 기록합니다.",
+                "",
+            ]
+            report_body = "\n".join(header + section_lines)
+        self._atomic_write_text(report_md_path, report_body + "\n")
         artifacts.append(report_md_path.as_posix())
         return artifacts

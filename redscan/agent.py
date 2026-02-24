@@ -5,7 +5,7 @@ import subprocess
 import uuid
 from typing import Any, Dict, List
 
-from .candidates import discover_candidates, Candidate
+from .candidates import discover_candidates_prioritized, Candidate
 from .http_parser import parse_burp_json
 from .config import load_env
 from .llm import LLMClient
@@ -31,6 +31,7 @@ class RedScanAgent:
         self.enable_commix = self._env_bool("REDSCAN_ENABLE_COMMIX", "1")
         self.enable_ffuf = self._env_bool("REDSCAN_ENABLE_FFUF", "1")
         self.tool_timeout = int(os.getenv("REDSCAN_TOOL_TIMEOUT", "45"))
+        self.max_candidates = max(1, min(int(os.getenv("REDSCAN_MAX_LLM_CANDIDATES", "9")), 9))
 
     def _env_bool(self, key: str, default: str = "0") -> bool:
         value = os.getenv(key, default)
@@ -48,7 +49,7 @@ class RedScanAgent:
     def triage(self, data: dict, path: str | None = None) -> Dict[str, Any]:
         req, _ = parse_burp_json(data)
         scan_path = path or req.url.split("?", 1)[0]
-        candidates = discover_candidates(req)
+        candidates = discover_candidates_prioritized(req, self.llm, max_candidates=self.max_candidates)
         if self.scan_logger:
             self.scan_logger.log(
                 path=scan_path,
@@ -90,7 +91,7 @@ class RedScanAgent:
     def probe(self, data: dict, active: bool = False, path: str | None = None) -> Dict[str, Any]:
         req, _ = parse_burp_json(data)
         scan_path = path or req.url.split("?", 1)[0]
-        candidates = discover_candidates(req)
+        candidates = discover_candidates_prioritized(req, self.llm, max_candidates=self.max_candidates)
         if self.scan_logger:
             self.scan_logger.log(
                 path=scan_path,
@@ -340,7 +341,8 @@ class RedScanAgent:
 
     def _heuristic_verdict(self, vuln_type: str, evidence: str) -> str:
         e = evidence.lower()
-        if "error" in e:
+        is_path_like = vuln_type in {"Path Traversal", "Unrestricted File Download"}
+        if "error" in e and not is_path_like:
             return "DISCARDED"
         if "time_delta" in e:
             # try to parse time_delta
@@ -356,7 +358,9 @@ class RedScanAgent:
             return "VERIFIED"
         if vuln_type == "Command Injection" and any(k in e for k in ["uid=", "gid=", "whoami"]):
             return "VERIFIED"
-        if vuln_type in ["Path Traversal", "Unrestricted File Download"] and "/etc/hosts" in e:
+        if is_path_like and any(
+            k in e for k in ["/etc/hosts", "/etc/passwd", "root:x:"]
+        ):
             return "VERIFIED"
         if vuln_type == "Unrestricted File Upload" and "verified=content_match" in e:
             return "VERIFIED"
