@@ -191,6 +191,13 @@ python3 main.py --input burp_packet.json --phase deep --active
 python3 main.py --input burp_packet.json --phase final --active
 ```
 
+`--input` 없이 실행하면 `stdin` JSON 입력을 기다립니다. 아래처럼 실행하면 됩니다.
+
+```bash
+python3 main.py --input samples/cli_stdin_sample.json --phase probe
+cat samples/cli_stdin_sample.json | python3 main.py --phase probe
+```
+
 ## 탐지 품질 개선 포인트 (내장)
 
 - Baseline vs Probe 응답 유사도/길이/시간 차이 비교
