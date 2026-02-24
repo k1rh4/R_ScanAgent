@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import uuid
 from typing import Any, Dict, List
 
@@ -331,13 +332,21 @@ class RedScanAgent:
         return {"analysis_status": "VERIFIED", "findings": findings}
 
     def run_sqlmap(self, cmd: List[str]) -> str:
+        print("[progress] tool 실행중... tool=sqlmap", file=sys.stderr, flush=True)
         result = subprocess.run(cmd, shell=False, capture_output=True, text=True)
+        print(f"[progress] tool 실행완료... tool=sqlmap exit={result.returncode}", file=sys.stderr, flush=True)
         return result.stdout + result.stderr
 
     def run_python(self, script: str) -> str:
+        print("[progress] tool 실행중... tool=python_script", file=sys.stderr, flush=True)
         path = run_python_script(script)
-        result = subprocess.run(["python", path], capture_output=True, text=True)
-        return result.stdout + result.stderr
+        try:
+            result = subprocess.run(["python", path], capture_output=True, text=True)
+            print(f"[progress] tool 실행완료... tool=python_script exit={result.returncode}", file=sys.stderr, flush=True)
+            return result.stdout + result.stderr
+        except Exception:
+            print("[progress] tool 실행완료... tool=python_script result=error", file=sys.stderr, flush=True)
+            raise
 
     def _heuristic_verdict(self, vuln_type: str, evidence: str) -> str:
         e = evidence.lower()

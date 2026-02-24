@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -135,13 +136,17 @@ def run_commix(req, vector: str, timeout_sec: int = 45) -> ToolValidationResult:
     if extra_headers:
         cmd.extend(["--headers", "\n".join(extra_headers)])
 
+    print(f"[progress] tool 실행중... tool=commix vector={vector}", file=sys.stderr, flush=True)
     try:
         run = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, shell=False)
     except FileNotFoundError:
+        print("[progress] tool 실행완료... tool=commix result=tool_not_installed", file=sys.stderr, flush=True)
         return ToolValidationResult("commix", False, False, " ".join(cmd), "tool_not_installed")
     except subprocess.TimeoutExpired:
+        print("[progress] tool 실행완료... tool=commix result=timeout", file=sys.stderr, flush=True)
         return ToolValidationResult("commix", True, False, " ".join(cmd), "timeout")
     except Exception as e:
+        print(f"[progress] tool 실행완료... tool=commix result=error", file=sys.stderr, flush=True)
         return ToolValidationResult("commix", True, False, " ".join(cmd), f"error={e}")
 
     output = (run.stdout or "") + "\n" + (run.stderr or "")
@@ -156,6 +161,7 @@ def run_commix(req, vector: str, timeout_sec: int = 45) -> ToolValidationResult:
         ]
     )
     evidence = "commix=confirmed" if confirmed else "commix=not_confirmed"
+    print(f"[progress] tool 실행완료... tool=commix confirmed={confirmed}", file=sys.stderr, flush=True)
     return ToolValidationResult("commix", True, confirmed, " ".join(cmd), evidence)
 
 
@@ -207,13 +213,17 @@ def run_ffuf(req, vector: str, timeout_sec: int = 45) -> ToolValidationResult:
                 continue
             cmd.extend(["-H", f"{k}: {v}"])
 
+        print(f"[progress] tool 실행중... tool=ffuf vector={vector}", file=sys.stderr, flush=True)
         try:
             subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, shell=False)
         except FileNotFoundError:
+            print("[progress] tool 실행완료... tool=ffuf result=tool_not_installed", file=sys.stderr, flush=True)
             return ToolValidationResult("ffuf", False, False, " ".join(cmd), "tool_not_installed")
         except subprocess.TimeoutExpired:
+            print("[progress] tool 실행완료... tool=ffuf result=timeout", file=sys.stderr, flush=True)
             return ToolValidationResult("ffuf", True, False, " ".join(cmd), "timeout")
         except Exception as e:
+            print("[progress] tool 실행완료... tool=ffuf result=error", file=sys.stderr, flush=True)
             return ToolValidationResult("ffuf", True, False, " ".join(cmd), f"error={e}")
 
         confirmed = False
@@ -225,6 +235,7 @@ def run_ffuf(req, vector: str, timeout_sec: int = 45) -> ToolValidationResult:
             confirmed = False
 
         evidence = "ffuf=confirmed" if confirmed else "ffuf=not_confirmed"
+        print(f"[progress] tool 실행완료... tool=ffuf confirmed={confirmed}", file=sys.stderr, flush=True)
         return ToolValidationResult("ffuf", True, confirmed, " ".join(cmd), evidence)
     finally:
         for p in [wordlist_file, output_file]:

