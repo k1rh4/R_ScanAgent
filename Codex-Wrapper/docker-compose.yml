@@ -1,0 +1,24 @@
+services:
+  codex-wrapper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CODEX_UID: ${HOST_UID:-1000}
+        CODEX_GID: ${HOST_GID:-1000}
+    restart: unless-stopped
+    image: codex-wrapper:latest
+    env_file:
+      - .env
+    environment:
+      CODEX_HOME: /home/codex/.codex
+      CODEX_WORKDIR: /workspace
+      CODEX_PATH: codex
+    ports:
+      - "8020:8000"
+    volumes:
+      - ${HOME}/.codex:/home/codex/.codex
+      - codex-workspace:/workspace
+
+volumes:
+  codex-workspace:

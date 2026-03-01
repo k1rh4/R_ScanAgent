@@ -1,28 +1,29 @@
 from __future__ import annotations
 
-import json
 import os
-import re
 import subprocess
 import sys
 import uuid
+from collections import defaultdict
 from typing import Any, Dict, List
 
-from .candidates import discover_candidates_prioritized, Candidate
-from .http_parser import parse_burp_json
+from .candidates import Candidate, discover_candidates_prioritized
 from .config import load_env
+from .http_parser import parse_burp_json
 from .llm import LLMClient
+from .llm_flow import LLMJudge, LLMPlanner
 from .policies import Policy
-from .scan_logger import ScanLogger
-from .tool_validators import run_commix, run_ffuf
 from .probing import (
-    probe_candidates,
-    sqlmap_command,
-    shell_join,
+    build_unauth_exploit,
     build_python_exploit,
-    run_python_script,
+    default_payloads,
+    probe_candidate,
+    shell_join,
+    sqlmap_command,
     write_raw_request,
 )
+from .scan_logger import ScanLogger
+from .tool_validators import run_commix, run_ffuf
 
 
 class RedScanAgent:
@@ -30,11 +31,16 @@ class RedScanAgent:
         load_env()
         self.policy = Policy.load(policy_path)
         self.llm = LLMClient()
+        self.planner = LLMPlanner(self.llm)
+        self.judge = LLMJudge(self.llm)
         self.scan_logger = scan_logger
+
         self.enable_commix = self._env_bool("REDSCAN_ENABLE_COMMIX", "1")
         self.enable_ffuf = self._env_bool("REDSCAN_ENABLE_FFUF", "1")
         self.tool_timeout = int(os.getenv("REDSCAN_TOOL_TIMEOUT", "45"))
         self.max_candidates = max(1, min(int(os.getenv("REDSCAN_MAX_LLM_CANDIDATES", "9")), 9))
+        self.max_probe_rounds = max(1, min(int(os.getenv("REDSCAN_MAX_PROBE_ROUNDS", "10")), 20))
+        self.max_payloads_per_round = max(1, min(int(os.getenv("REDSCAN_MAX_PAYLOADS_PER_ROUND", "2")), 5))
 
     def _env_bool(self, key: str, default: str = "0") -> bool:
         value = os.getenv(key, default)
@@ -43,11 +49,29 @@ class RedScanAgent:
     def _system_message(self) -> str:
         base = (
             "You are an autonomous red-team agent. Focus only on critical vulnerabilities: "
-            "SQL Injection, Command Injection, Path Traversal, Unrestricted File Upload/Download, IDOR."
+            "SQL Injection, Command Injection, Path Traversal, Unrestricted File Upload/Download, IDOR, Unauthenticated API Access."
         )
         if self.policy.text:
             return base + "\nCustom policy:\n" + self.policy.text
         return base
+
+    def _finding_key(self, finding: Dict[str, Any]) -> tuple[str, str]:
+        return str(finding.get("type", "")), str(finding.get("vector", ""))
+
+    def _request_context(self, req) -> Dict[str, Any]:
+        auth_headers = {"authorization", "proxy-authorization", "x-api-key", "x-auth-token"}
+        header_names = [k.lower() for k in req.headers.keys()]
+        has_auth_header = any(h in header_names for h in auth_headers)
+        has_cookie = bool(req.headers.get("Cookie"))
+        return {
+            "method": req.method,
+            "url": req.url,
+            "path": req.url.split("?", 1)[0],
+            "query_keys": sorted(list(req.query.keys())),
+            "header_names": sorted(header_names),
+            "has_cookie": has_cookie,
+            "has_auth_header": has_auth_header,
+        }
 
     def triage(self, data: dict, path: str | None = None) -> Dict[str, Any]:
         req, res = parse_burp_json(data)
@@ -60,29 +84,31 @@ class RedScanAgent:
                 event="phase_start",
                 message=f"candidate discovery started (count={len(candidates)})",
             )
-        findings = [
-            {
-                "id": str(uuid.uuid4()),
-                "type": c.vuln_type,
-                "vector": f"{c.param}/{c.location}",
-                "reasoning": c.reason,
-                "action": {"tool": "pending", "payload": ""},
-                "verification_evidence": "",
-            }
-            for c in candidates
-        ]
-        if self.scan_logger:
-            for c in candidates:
-                vector = f"{c.param}/{c.location}"
+
+        findings = []
+        for c in candidates:
+            findings.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": c.vuln_type,
+                    "vector": f"{c.param}/{c.location}",
+                    "reasoning": c.reason,
+                    "action": {"tool": "pending", "payload": ""},
+                    "verification_evidence": "",
+                }
+            )
+            if self.scan_logger:
                 self.scan_logger.log(
                     path=scan_path,
                     phase="triage",
                     event="candidate_selected",
                     vuln_type=c.vuln_type,
-                    vector=vector,
+                    vector=f"{c.param}/{c.location}",
                     reason=c.reason,
                     message="candidate selected for probing",
                 )
+
+        if self.scan_logger:
             self.scan_logger.log(
                 path=scan_path,
                 phase="triage",
@@ -102,11 +128,69 @@ class RedScanAgent:
                 event="phase_start",
                 message=f"probing started (active={active}, candidates={len(candidates)})",
             )
-        results = probe_candidates(req, candidates, self.policy, active=active)
-        findings = []
-        for r in results:
-            findings.append(
-                {
+
+        findings: List[Dict[str, Any]] = []
+        req_context = self._request_context(req)
+
+        for c in candidates:
+            history: List[str] = []
+            attempted_payloads: set[str] = set()
+            round_results = []
+            rounds = 1 if not active else self.max_probe_rounds
+
+            for _ in range(rounds):
+                fallback = [p for p in default_payloads(c.vuln_type, self.policy, max_payloads=6) if p not in attempted_payloads]
+                if not fallback and active:
+                    break
+
+                finding_for_plan = {
+                    "type": c.vuln_type,
+                    "vector": f"{c.param}/{c.location}",
+                    "reasoning": c.reason,
+                }
+                plan = self.planner.propose_payloads(
+                    finding=finding_for_plan,
+                    evidence_history=history,
+                    fallback_payloads=fallback,
+                    max_payloads=self.max_payloads_per_round,
+                )
+
+                payloads = [p for p in plan.payloads if p and p not in attempted_payloads]
+                if plan.stop and not payloads:
+                    break
+                if not payloads:
+                    payloads = fallback[: self.max_payloads_per_round]
+                if not payloads:
+                    break
+
+                for p in payloads:
+                    attempted_payloads.add(p)
+
+                chunk = probe_candidate(req, c, self.policy, active=active, payloads=payloads)
+                round_results.extend(chunk)
+                for r in chunk:
+                    if r.evidence:
+                        history.append(r.evidence)
+
+                # Early break when LLM judge sees enough evidence.
+                if finding_for_plan.get("type") == "Unauthenticated API Access":
+                    verdict = self.judge.judge(
+                        finding=finding_for_plan,
+                        evidence_history=history,
+                        request_context=req_context,
+                    )
+                else:
+                    verdict = self.judge.judge(finding=finding_for_plan, evidence_history=history)
+                if verdict.status in {"VERIFIED", "DISCARDED"} and verdict.next_action == "STOP":
+                    break
+
+            # Fallback for empty result edge case.
+            if not round_results:
+                chunk = probe_candidate(req, c, self.policy, active=active)
+                round_results.extend(chunk)
+
+            for r in round_results:
+                finding = {
                     "id": r.id,
                     "type": r.vuln_type,
                     "vector": r.vector,
@@ -114,102 +198,33 @@ class RedScanAgent:
                     "action": {"tool": r.tool, "payload": r.payload},
                     "verification_evidence": r.evidence,
                 }
-            )
-            if self.scan_logger:
-                self.scan_logger.log(
-                    path=scan_path,
-                    phase="probe",
-                    event="candidate_probed",
-                    vuln_type=r.vuln_type,
-                    vector=r.vector,
-                    reason=r.reasoning,
-                    evidence=r.evidence,
-                    message=f"probe executed with tool={r.tool}",
-                )
+                findings.append(finding)
+                if self.scan_logger:
+                    self.scan_logger.log(
+                        path=scan_path,
+                        phase="probe",
+                        event="candidate_probed",
+                        vuln_type=r.vuln_type,
+                        vector=r.vector,
+                        reason=r.reasoning,
+                        evidence=r.evidence,
+                        message=f"probe executed with tool={r.tool}",
+                    )
+
         if self.scan_logger:
             self.scan_logger.log(
                 path=scan_path,
                 phase="probe",
                 event="phase_end",
-                message=f"probing finished (results={len(results)})",
+                message=f"probing finished (results={len(findings)})",
             )
         return {"analysis_status": "PROBING", "findings": findings}
-
-    def deep_analysis(
-        self,
-        data: dict,
-        probe_results: Dict[str, Any],
-        path: str | None = None,
-        active: bool = False,
-    ) -> Dict[str, Any]:
-        # Heuristic + optional LLM verification
-        req, _ = parse_burp_json(data)
-        scan_path = path or req.url.split("?", 1)[0]
-        if self.scan_logger:
-            self.scan_logger.log(
-                path=scan_path,
-                phase="deep",
-                event="phase_start",
-                message=f"deep analysis started (findings={len(probe_results.get('findings', []))})",
-            )
-        findings = []
-        for f in probe_results.get("findings", []):
-            evidence = f.get("verification_evidence", "")
-            status = self._heuristic_verdict(f.get("type", ""), evidence)
-
-            if active:
-                tool_status, tool_evidence, tool_name, tool_cmd = self._preverify_with_tool(req, f, evidence)
-                if tool_evidence:
-                    evidence = (evidence + " " + tool_evidence).strip()
-                if tool_status == "VERIFIED":
-                    status = "VERIFIED"
-                if self.scan_logger and tool_name:
-                    self.scan_logger.log(
-                        path=scan_path,
-                        phase="deep",
-                        event="tool_preverify",
-                        vuln_type=f.get("type"),
-                        vector=f.get("vector"),
-                        reason=f.get("reasoning"),
-                        evidence=evidence,
-                        message=f"tool={tool_name} status={tool_status} cmd={tool_cmd}",
-                    )
-
-            if f.get("type") == "IDOR" and self.llm.available():
-                status = self._llm_idor_verdict(f, evidence, status)
-            if self.llm.available() and status == "VERIFIED" and not self._is_strong_path_signal(f, evidence):
-                status = self._llm_downgrade_only(f, evidence, status)
-            findings.append({**f, "analysis_status": status, "verification_evidence": evidence})
-            if self.scan_logger:
-                self.scan_logger.log(
-                    path=scan_path,
-                    phase="deep",
-                    event="analysis_verdict",
-                    vuln_type=f.get("type"),
-                    vector=f.get("vector"),
-                    reason=f.get("reasoning"),
-                    evidence=evidence,
-                    message=f"verdict={status}",
-                )
-        if self.scan_logger:
-            self.scan_logger.log(
-                path=scan_path,
-                phase="deep",
-                event="phase_end",
-                message=f"deep analysis finished (findings={len(findings)})",
-            )
-        final_status = "VERIFIED" if any(f.get("analysis_status") == "VERIFIED" for f in findings) else "DISCARDED"
-        return {"analysis_status": final_status, "findings": findings}
 
     def _tool_eligible_by_llm(self, finding: Dict[str, Any], evidence: str) -> bool:
         if not self.llm.available():
             return True
-        system = (
-            "You are a security triage classifier. "
-            "Decide if expensive external verification tool should run."
-        )
+        system = "You decide if expensive external verification tool should run. Return only HIGH or LOW."
         user = (
-            "Return only HIGH or LOW.\n"
             f"type={finding.get('type')}\n"
             f"vector={finding.get('vector')}\n"
             f"reasoning={finding.get('reasoning')}\n"
@@ -220,18 +235,6 @@ class RedScanAgent:
             return "HIGH" in out
         except Exception:
             return True
-
-    def _is_strong_path_signal(self, finding: Dict[str, Any], evidence: str) -> bool:
-        vtype = finding.get("type", "")
-        vector = finding.get("vector", "")
-        if vtype not in {"Path Traversal", "Unrestricted File Download"}:
-            return False
-        if not vector.endswith("/path"):
-            return False
-        text = f"{finding.get('reasoning', '')} {evidence}".lower()
-        has_traversal = any(t in text for t in ["../", "..\\", "%2e%2e", "%2f", "%5c", "traversal"])
-        has_sensitive = any(t in text for t in ["/etc/passwd", "/etc/hosts", "win.ini", "boot.ini", "root:x:"])
-        return has_traversal and has_sensitive
 
     def _preverify_with_tool(self, req, finding: Dict[str, Any], evidence: str) -> tuple[str, str, str, str]:
         vtype = finding.get("type", "")
@@ -245,15 +248,107 @@ class RedScanAgent:
 
         if vtype == "Command Injection" and self.enable_commix:
             result = run_commix(req, vector, timeout_sec=self.tool_timeout)
-            status = "VERIFIED" if result.confirmed else "DISCARDED"
+            status = "VERIFIED" if result.confirmed else "PROBING"
             return status, result.evidence, result.tool, result.command
 
         if vtype in {"Path Traversal", "Unrestricted File Download"} and self.enable_ffuf:
             result = run_ffuf(req, vector, timeout_sec=self.tool_timeout)
-            status = "VERIFIED" if result.confirmed else "DISCARDED"
+            status = "VERIFIED" if result.confirmed else "PROBING"
             return status, result.evidence, result.tool, result.command
 
         return "SKIPPED", "tool_disabled", "", ""
+
+    def deep_analysis(
+        self,
+        data: dict,
+        probe_results: Dict[str, Any],
+        path: str | None = None,
+        active: bool = False,
+    ) -> Dict[str, Any]:
+        req, _ = parse_burp_json(data)
+        scan_path = path or req.url.split("?", 1)[0]
+
+        if self.scan_logger:
+            self.scan_logger.log(
+                path=scan_path,
+                phase="deep",
+                event="phase_start",
+                message=f"deep analysis started (findings={len(probe_results.get('findings', []))})",
+            )
+
+        grouped: dict[tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        for f in probe_results.get("findings", []):
+            grouped[self._finding_key(f)].append(f)
+
+        findings: List[Dict[str, Any]] = []
+        req_context = self._request_context(req)
+        for _, group in grouped.items():
+            base = group[-1]
+            evidence_history = [str(g.get("verification_evidence", "")).strip() for g in group if g.get("verification_evidence")]
+            if base.get("type") == "Unauthenticated API Access":
+                verdict = self.judge.judge(
+                    finding=base,
+                    evidence_history=evidence_history,
+                    request_context=req_context,
+                )
+            else:
+                verdict = self.judge.judge(finding=base, evidence_history=evidence_history)
+            status = verdict.status
+
+            merged_evidence = " || ".join(evidence_history[-5:]).strip()
+            if verdict.reason:
+                merged_evidence = (merged_evidence + f" judge_reason={verdict.reason} conf={verdict.confidence:.2f}").strip()
+
+            if active and status != "VERIFIED":
+                tool_status, tool_evidence, tool_name, tool_cmd = self._preverify_with_tool(req, base, merged_evidence)
+                if tool_evidence:
+                    merged_evidence = (merged_evidence + " " + tool_evidence).strip()
+                if tool_status == "VERIFIED":
+                    status = "VERIFIED"
+                if self.scan_logger and tool_name:
+                    self.scan_logger.log(
+                        path=scan_path,
+                        phase="deep",
+                        event="tool_preverify",
+                        vuln_type=base.get("type"),
+                        vector=base.get("vector"),
+                        reason=base.get("reasoning"),
+                        evidence=merged_evidence,
+                        message=f"tool={tool_name} status={tool_status} cmd={tool_cmd}",
+                    )
+
+            if status == "PROBING":
+                status = "DISCARDED"
+
+            finding_out = {
+                **base,
+                "analysis_status": status,
+                "verification_evidence": merged_evidence,
+            }
+            findings.append(finding_out)
+
+            if self.scan_logger:
+                self.scan_logger.log(
+                    path=scan_path,
+                    phase="deep",
+                    event="analysis_verdict",
+                    vuln_type=base.get("type"),
+                    vector=base.get("vector"),
+                    reason=base.get("reasoning"),
+                    evidence=merged_evidence,
+                    message=f"verdict={status}",
+                )
+
+        if self.scan_logger:
+            self.scan_logger.log(
+                path=scan_path,
+                phase="deep",
+                event="phase_end",
+                message=f"deep analysis finished (findings={len(findings)})",
+            )
+
+        final_status = "VERIFIED" if any(f.get("analysis_status") == "VERIFIED" for f in findings) else "DISCARDED"
+        return {"analysis_status": final_status, "findings": findings}
 
     def final_exploit(self, data: dict, analysis: Dict[str, Any], path: str | None = None) -> Dict[str, Any]:
         req, _ = parse_burp_json(data)
@@ -307,14 +402,23 @@ class RedScanAgent:
                             evidence=f.get("verification_evidence"),
                             message=f"sqlmap executed, verdict={f.get('analysis_status')}",
                         )
-                    findings.append(
-                        {
-                            **f,
-                            "action": {"tool": "sqlmap", "payload": shell_join(cmd)},
-                        }
-                    )
+                    findings.append({**f, "action": {"tool": "sqlmap", "payload": shell_join(cmd)}})
+                elif vtype == "Unauthenticated API Access":
+                    script = build_unauth_exploit(req)
+                    if self.scan_logger:
+                        self.scan_logger.log(
+                            path=scan_path,
+                            phase="final",
+                            event="exploit_script_built",
+                            vuln_type=f.get("type"),
+                            vector=f.get("vector"),
+                            reason=f.get("reasoning"),
+                            evidence=f.get("verification_evidence"),
+                            message="unauthenticated-api exploit script generated",
+                        )
+                    findings.append({**f, "action": {"tool": "python_script", "payload": script}})
                 else:
-                    payload = f["action"]["payload"]
+                    payload = f["action"].get("payload", "")
                     script = build_python_exploit(req, c, payload)
                     if self.scan_logger:
                         self.scan_logger.log(
@@ -327,12 +431,7 @@ class RedScanAgent:
                             evidence=f.get("verification_evidence"),
                             message="python exploit script generated",
                         )
-                    findings.append(
-                        {
-                            **f,
-                            "action": {"tool": "python_script", "payload": script},
-                        }
-                    )
+                    findings.append({**f, "action": {"tool": "python_script", "payload": script}})
         finally:
             try:
                 os.remove(raw_path)
@@ -355,103 +454,6 @@ class RedScanAgent:
         print(f"[progress] tool 실행완료... tool=sqlmap exit={result.returncode}", file=sys.stderr, flush=True)
         return result.stdout + result.stderr
 
-    def run_python(self, script: str) -> str:
-        print("[progress] tool 실행중... tool=python_script", file=sys.stderr, flush=True)
-        path = run_python_script(script)
-        try:
-            result = subprocess.run(["python", path], capture_output=True, text=True)
-            print(f"[progress] tool 실행완료... tool=python_script exit={result.returncode}", file=sys.stderr, flush=True)
-            return result.stdout + result.stderr
-        except Exception:
-            print("[progress] tool 실행완료... tool=python_script result=error", file=sys.stderr, flush=True)
-            raise
-
-    def _heuristic_verdict(self, vuln_type: str, evidence: str) -> str:
-        e = evidence.lower()
-        is_path_like = vuln_type in {"Path Traversal", "Unrestricted File Download"}
-        if "error" in e and not is_path_like:
-            return "DISCARDED"
-        if vuln_type == "IDOR":
-            try:
-                data = {}
-                if evidence.strip().startswith("{"):
-                    data = json.loads(evidence)
-                s = int(data.get("status_probe", 0)) if data else 0
-                auth_hint = str(data.get("auth_hint", ""))
-                if s in {401, 403} or auth_hint == "denied":
-                    return "DISCARDED"
-                sim = float(data.get("similarity", 0.0))
-                ratio = float(data.get("len_ratio", 0.0))
-                if s in {200, 201} and sim >= 0.7 and 0.5 <= ratio <= 1.5 and auth_hint == "none":
-                    return "VERIFIED"
-            except Exception:
-                pass
-            return "DISCARDED"
-        if "time_delta" in e:
-            # try to parse time_delta
-            try:
-                for part in e.split():
-                    if part.startswith("time_delta="):
-                        delta = float(part.split("=")[1].replace("s", ""))
-                        if delta >= 1.5:
-                            return "VERIFIED"
-            except Exception:
-                pass
-        if any(k in e for k in ["sql", "syntax", "mysql", "postgres", "oracle", "mssql", "sqlite"]):
-            return "VERIFIED"
-        if vuln_type == "Command Injection" and any(k in e for k in ["uid=", "gid=", "whoami"]):
-            return "VERIFIED"
-        if is_path_like and any(
-            k in e for k in ["/etc/hosts", "/etc/passwd", "root:x:"]
-        ):
-            return "VERIFIED"
-        if vuln_type == "Unrestricted File Upload" and "verified=content_match" in e:
-            return "VERIFIED"
-        return "DISCARDED"
-
-    def _llm_idor_verdict(self, finding: Dict[str, Any], evidence: str, current: str) -> str:
-        system = (
-            "You are a strict but high-sensitivity IDOR (Insecure Direct Object Reference) classifier. "
-            "Favor VERIFIED only when the evidence strongly suggests unauthorized access without explicit denial. "
-            "Treat 2xx responses with similar content/length and auth_hint=none as likely IDOR. "
-            "If there is any clear denial (401/403 or auth_hint=denied), return DISCARDED. "
-            "If evidence is ambiguous, return DISCARDED."
-        )
-        user = (
-            "Return only one token: VERIFIED or DISCARDED.\n"
-            f"type={finding.get('type')}\n"
-            f"vector={finding.get('vector')}\n"
-            f"reasoning={finding.get('reasoning')}\n"
-            f"evidence={evidence}\n"
-        )
-        try:
-            resp = self.llm.chat(system, user).strip().upper()
-            if "VERIFIED" in resp:
-                return "VERIFIED"
-            if "DISCARDED" in resp:
-                return "DISCARDED"
-        except Exception:
-            return current
-        return current
-
-    def _llm_downgrade_only(self, finding: Dict[str, Any], evidence: str, current: str) -> str:
-        system = self._system_message()
-        user = (
-            "Only downgrade if evidence is insufficient. "
-            "Return only one token: DISCARDED or KEEP.\n\n"
-            f"finding_type={finding.get('type')}\n"
-            f"vector={finding.get('vector')}\n"
-            f"evidence={evidence}\n"
-        )
-        try:
-            resp = self.llm.chat(system, user).strip().upper()
-            if "DISCARDED" in resp:
-                return "DISCARDED"
-        except Exception:
-            return current
-        return current
-
     def _sqlmap_verified(self, output: str) -> bool:
         out = output.lower()
-        # sqlmap commonly prints when injection is found
         return "sql injection" in out and "is vulnerable" in out

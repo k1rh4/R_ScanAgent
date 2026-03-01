@@ -29,15 +29,18 @@ def main():
     p.add_argument("--input", help="Path to Burp JSON input (else stdin)")
     p.add_argument("--policy", default="custom_policy.txt", help="Path to custom_policy.txt")
     p.add_argument("--active", action="store_true", help="Enable active HTTP probing")
-    p.add_argument("--phase", choices=["triage", "probe", "deep", "final"], default="probe")
+    p.add_argument("--phase", choices=["triage", "probe"], default="probe")
     args = p.parse_args()
 
     progress(f"scan started (phase={args.phase}, active={args.active})")
     data = load_input(args.input)
     progress("input loaded")
-    path_tracker = CompletedPathTracker(os.getenv("REDSCAN_COMPLETE_PATH_LOG", "complete_path.log"))
-    scan_logger = ScanLogger(os.getenv("REDSCAN_SCAN_LOG", "scan.log"))
-    output_writer = OutputWriter(os.getenv("REDSCAN_OUTPUT_DIR", "output"))
+    output_dir = os.getenv("REDSCAN_OUTPUT_DIR", "output")
+    path_tracker = CompletedPathTracker(
+        os.getenv("REDSCAN_COMPLETE_PATH_LOG", os.path.join(output_dir, "complete_path.log"))
+    )
+    scan_logger = ScanLogger(os.getenv("REDSCAN_SCAN_LOG", os.path.join(output_dir, "scan.log")))
+    output_writer = OutputWriter(output_dir)
     path = path_tracker.extract_path(data)
     dedupe_key = path_tracker.extract_dedupe_key(data)
     progress(f"path extracted: {path}")
@@ -70,21 +73,16 @@ def main():
         if args.phase == "triage":
             progress("phase triage started")
             out = agent.triage(data, path=path)
-        elif args.phase == "probe":
-            progress("phase probe started")
-            out = agent.probe(data, active=args.active, path=path)
-        elif args.phase == "deep":
-            progress("phase probe started")
-            probe = agent.probe(data, active=args.active, path=path)
-            progress("phase deep started")
-            out = agent.deep_analysis(data, probe, path=path, active=args.active)
         else:
             progress("phase probe started")
             probe = agent.probe(data, active=args.active, path=path)
             progress("phase deep started")
             analysis = agent.deep_analysis(data, probe, path=path, active=args.active)
-            progress("phase final started")
-            out = agent.final_exploit(data, analysis, path=path)
+            if args.active:
+                progress("phase final started")
+                out = agent.final_exploit(data, analysis, path=path)
+            else:
+                out = analysis
         progress(f"phase {args.phase} completed in {time.perf_counter() - phase_start:.2f}s")
 
         print(json.dumps(out, ensure_ascii=False, indent=2))

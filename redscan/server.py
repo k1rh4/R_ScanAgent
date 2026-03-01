@@ -18,7 +18,7 @@ from .scan_logger import ScanLogger
 
 class ScanRequest(BaseModel):
     data: dict
-    phase: str = "probe"  # triage | probe | deep | final
+    phase: str = "probe"  # triage | probe
     active: bool = False
 
 
@@ -42,10 +42,13 @@ class Job:
 
 
 app = FastAPI(title="RedScan API", version="0.2.0")
-scan_logger = ScanLogger(os.getenv("REDSCAN_SCAN_LOG", "scan.log"))
+_output_dir = os.getenv("REDSCAN_OUTPUT_DIR", "output")
+scan_logger = ScanLogger(os.getenv("REDSCAN_SCAN_LOG", os.path.join(_output_dir, "scan.log")))
 agent = RedScanAgent(scan_logger=scan_logger)
-path_tracker = CompletedPathTracker(os.getenv("REDSCAN_COMPLETE_PATH_LOG", "complete_path.log"))
-output_writer = OutputWriter(os.getenv("REDSCAN_OUTPUT_DIR", "output"))
+path_tracker = CompletedPathTracker(
+    os.getenv("REDSCAN_COMPLETE_PATH_LOG", os.path.join(_output_dir, "complete_path.log"))
+)
+output_writer = OutputWriter(_output_dir)
 
 MAX_CONCURRENCY = int(os.getenv("REDSCAN_CONCURRENCY", "4"))
 QUEUE_SIZE = int(os.getenv("REDSCAN_QUEUE_SIZE", "100"))
@@ -100,15 +103,13 @@ async def _worker(worker_id: int):
             )
             if req.phase == "triage":
                 out = agent.triage(req.data, path=path)
-            elif req.phase == "probe":
-                out = agent.probe(req.data, active=req.active, path=path)
-            elif req.phase == "deep":
-                probe = agent.probe(req.data, active=req.active, path=path)
-                out = agent.deep_analysis(req.data, probe, path=path, active=req.active)
             else:
                 probe = agent.probe(req.data, active=req.active, path=path)
                 analysis = agent.deep_analysis(req.data, probe, path=path, active=req.active)
-                out = agent.final_exploit(req.data, analysis, path=path)
+                if req.active:
+                    out = agent.final_exploit(req.data, analysis, path=path)
+                else:
+                    out = analysis
 
             try:
                 artifacts = output_writer.write(req.data, path, req.phase, out)
@@ -180,7 +181,7 @@ def health():
 
 @app.post("/scan", response_model=ScanResponse)
 async def scan(req: ScanRequest):
-    if req.phase not in {"triage", "probe", "deep", "final"}:
+    if req.phase not in {"triage", "probe"}:
         raise HTTPException(status_code=400, detail="invalid phase")
     job_id = str(uuid.uuid4())
     _prune_results()

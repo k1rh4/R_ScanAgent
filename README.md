@@ -14,9 +14,8 @@ Burp Suite HTTP History(JSON) 기반으로 치명적 취약점만 선별/검증�
    -> dedupe key(METHOD host/path) 예약
    -> phase 실행
       triage: 후보만 뽑음
-      probe: 후보 + payload 주입 결과 수집
-      deep: probe + 판정(휴리스틱, 도구, LLM 보정)
-      final: VERIFIED만 exploit/sqlmap 실행
+      probe(active=false): 후보 + payload 주입 결과 수집 + deep 판정
+      probe(active=true): 후보 + payload 주입 + deep 판정 + final exploit/sqlmap 실행
    -> 결과/아티팩트 저장 + dedupe 완료
 ```
 
@@ -43,12 +42,12 @@ Burp Suite HTTP History(JSON) 기반으로 치명적 취약점만 선별/검증�
 - 증거는 `status/len/time_delta/similarity/hint` 중심으로 수집됩니다.
 - `active=false`면 실제 전송 없이 예상 probe 결과만 생성합니다.
 
-6. Deep 판정
+6. Deep 판정 (probe 내부 단계)
 - 휴리스틱으로 `VERIFIED`/`DISCARDED`를 먼저 결정합니다.
 - `active=true`면 `commix`/`ffuf` 사전검증을 추가 수행할 수 있습니다.
 - `VERIFIED` 결과는 LLM으로 다운그레이드 전용 재검토(`KEEP` 또는 `DISCARDED`)를 거칩니다.
 
-7. Final 단계
+7. Final 단계 (probe 내부 단계, active=true일 때만)
 - `VERIFIED`만 처리합니다.
 - SQLi는 `sqlmap -r <raw_request>`로 최종 검증합니다.
 - 그 외 유형은 재현용 Python exploit 스크립트를 생성합니다.
@@ -64,8 +63,8 @@ Burp Suite HTTP History(JSON) 기반으로 치명적 취약점만 선별/검증�
 3. 다운그레이드 전용 검토
 - 이미 `VERIFIED`인 결과를 `DISCARDED`로 낮출지 판단합니다.
 
-4. IDOR 판정
-- IDOR 프로빙 응답을 기반으로 `VERIFIED`/`DISCARDED`를 보수적으로 판단합니다.
+4. IDOR / Unauthenticated API Access 판정
+- IDOR 및 세션 제거 기반 비인가 API 접근 프로빙 응답을 기반으로 `VERIFIED`/`DISCARDED`를 보수적으로 판단합니다.
 
 ## 사용 Tool 맵
 
@@ -92,8 +91,8 @@ docker run --rm -p 8000:8000 \
   -v "$PWD/output":/app/output \
   -v "$PWD/runtime":/app/runtime \
   -e REDSCAN_OUTPUT_DIR=/app/output \
-  -e REDSCAN_SCAN_LOG=/app/runtime/scan.log \
-  -e REDSCAN_COMPLETE_PATH_LOG=/app/runtime/complete_path.log \
+  -e REDSCAN_SCAN_LOG=/app/output/scan.log \
+  -e REDSCAN_COMPLETE_PATH_LOG=/app/output/complete_path.log \
   redscan:latest
 ```
 
@@ -110,12 +109,14 @@ docker compose up --build
 - `REDSCAN_QUEUE_SIZE`: 큐 크기 (기본 `100`)
 - `REDSCAN_RESULT_TTL_SEC`: `/result` 보관 시간(초, 기본 `3600`)
 - `REDSCAN_RESULT_MAX_ITEMS`: `/result` 최대 보관 개수(기본 `10000`)
-- `REDSCAN_COMPLETE_PATH_LOG`: 완료 path 로그 파일 (기본 `complete_path.log`)
-- `REDSCAN_SCAN_LOG`: 스캔 로그 파일 (기본 `scan.log`)
+- `REDSCAN_COMPLETE_PATH_LOG`: 완료 path 로그 파일 (기본 `output/complete_path.log`)
+- `REDSCAN_SCAN_LOG`: 스캔 로그 파일 (기본 `output/scan.log`)
 - `REDSCAN_OUTPUT_DIR`: 산출물 디렉토리 (기본 `output`)
 - `REDSCAN_ENABLE_COMMIX`: `commix` 사용 여부 (기본 `1`)
 - `REDSCAN_ENABLE_FFUF`: `ffuf` 사용 여부 (기본 `1`)
 - `REDSCAN_TOOL_TIMEOUT`: 외부 도구 타임아웃(초, 기본 `45`)
+- `REDSCAN_MAX_PROBE_ROUNDS`: 후보당 LLM 계획 기반 프로빙 라운드 수 (기본 `10`, 최대 `20`)
+- `REDSCAN_MAX_PAYLOADS_PER_ROUND`: 라운드당 LLM payload 시도 수 (기본 `2`, 최대 `5`)
 - `REDSCAN_SCAN_LOG_MAX_BYTES`: 로그 로테이션 기준 크기 (기본 `10485760`)
 - `REDSCAN_SCAN_LOG_BACKUP_COUNT`: 로그 백업 개수 (기본 `5`)
 - `REDSCAN_MAX_LLM_CANDIDATES`: LLM 후보 상한 (기본 `9`, 최대 `9`)
@@ -142,9 +143,8 @@ curl http://localhost:8000/result/<job_id>
 
 ```bash
 python3 main.py --input samples/cli_stdin_sample.json --phase triage
+python3 main.py --input samples/cli_stdin_sample.json --phase probe
 python3 main.py --input samples/cli_stdin_sample.json --phase probe --active
-python3 main.py --input samples/cli_stdin_sample.json --phase deep --active
-python3 main.py --input samples/cli_stdin_sample.json --phase final --active
 ```
 
 `--input` 없이 실행하면 `stdin` JSON 입력을 사용합니다.
@@ -197,7 +197,7 @@ cat samples/cli_stdin_sample.json | python3 main.py --phase probe
 }
 ```
 
-### 3) `deep`
+### 3) `probe` + `active=false` (deep 판정 포함)
 
 ```json
 {
@@ -219,7 +219,7 @@ cat samples/cli_stdin_sample.json | python3 main.py --phase probe
 }
 ```
 
-### 4) `final`
+### 4) `probe` + `active=true` (final exploit 포함)
 
 ```json
 {
@@ -267,8 +267,8 @@ cat samples/cli_stdin_sample.json | python3 main.py --phase probe
 
 ## 산출물/로그
 
-- 중복 키 로그: `complete_path.log`
-- 진행 로그(JSON Lines): `scan.log`
+- 중복 키 로그: `output/complete_path.log`
+- 진행 로그(JSON Lines): `output/scan.log`
 - 취약점 산출물: `output/<path>/`
 - `VERIFIED` 결과가 있으면 `report.md`, `exploit_*` 파일이 생성됩니다.
 

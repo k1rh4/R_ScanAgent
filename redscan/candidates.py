@@ -14,6 +14,7 @@ CRITICAL_TYPES = [
     "Unrestricted File Upload",
     "Unrestricted File Download",
     "IDOR",
+    "Unauthenticated API Access",
 ]
 
 
@@ -172,10 +173,6 @@ def _normalize_candidates(payload: Any, max_candidates: int) -> List[Candidate]:
     return ranked[:max_candidates]
 
 
-def discover_candidates(req) -> List[Candidate]:
-    return discover_candidates_rules(req)
-
-
 def discover_candidates_rules(req) -> List[Candidate]:
     candidates: List[Candidate] = []
 
@@ -186,6 +183,7 @@ def discover_candidates_rules(req) -> List[Candidate]:
         "Unrestricted File Upload": ["file", "upload", "image", "avatar", "document"],
         "Unrestricted File Download": ["file", "download", "path", "name"],
         "IDOR": ["id", "user", "user_id", "account", "account_id", "order", "order_id", "doc", "project", "team"],
+        "Unauthenticated API Access": ["admin", "private", "internal", "config", "billing", "token", "profile"],
     }
 
     # Query params
@@ -199,6 +197,7 @@ def discover_candidates_rules(req) -> List[Candidate]:
         "Unrestricted File Upload": ["upload", "import"],
         "Unrestricted File Download": ["download", "export", "file"],
         "IDOR": ["user", "account", "order", "invoice", "profile", "project", "team", "resource"],
+        "Unauthenticated API Access": ["api", "admin", "private", "internal", "me", "account", "billing", "settings"],
     }
 
     for k in req.query.keys():
@@ -286,6 +285,26 @@ def discover_candidates_rules(req) -> List[Candidate]:
     if "multipart/form-data" in ctype:
         candidates.append(Candidate("Unrestricted File Upload", "body", "multipart", "Multipart upload observed.", 3, "rules"))
 
+    # Auth-required API hint (fallback when LLM is unavailable).
+    auth_headers = {k.lower() for k in req.headers.keys()}
+    has_auth = bool(req.headers.get("Cookie")) or any(
+        h in auth_headers for h in {"authorization", "x-api-key", "x-auth-token", "proxy-authorization"}
+    )
+    if has_auth and (
+        parsed_path.startswith("/api/")
+        or any(token in parsed_path for token in ["/admin", "/private", "/internal", "/me", "/settings", "/billing"])
+    ):
+        candidates.append(
+            Candidate(
+                "Unauthenticated API Access",
+                "path",
+                "__path__",
+                "Endpoint appears authentication-sensitive and request carries session/auth headers.",
+                4,
+                "rules",
+            )
+        )
+
     return sorted(candidates, key=lambda c: c.score, reverse=True)
 
 
@@ -300,7 +319,7 @@ def discover_candidates_prioritized(req, llm_client, max_candidates: int = 9, re
         "You are a web security candidate selector. "
         "Given an HTTP request attack surface, choose the highest-risk candidates for probing. "
         "Focus only on these vulnerability types: "
-        "SQL Injection, Command Injection, Path Traversal, Unrestricted File Upload, Unrestricted File Download, IDOR."
+        "SQL Injection, Command Injection, Path Traversal, Unrestricted File Upload, Unrestricted File Download, IDOR, Unauthenticated API Access."
     )
     user = (
         "Return strict JSON only.\n"
@@ -308,7 +327,7 @@ def discover_candidates_prioritized(req, llm_client, max_candidates: int = 9, re
         "{\n"
         '  "candidates": [\n'
         "    {\n"
-        '      "vuln_type": one of the 6 allowed strings,\n'
+        '      "vuln_type": one of the allowed strings,\n'
         '      "location": "query" | "body" | "cookie" | "header" | "path",\n'
         '      "param": parameter key (for path always "__path__"),\n'
         '      "priority": integer 1..10,\n'

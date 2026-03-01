@@ -1,0 +1,26 @@
+# Local environment
+.env
+
+# Python cache/artifacts
+__pycache__/
+*.pyc
+
+# Editor temp files
+*.swp
+
+# Runtime logs
+scan.log
+complete_path.log
+runtime/scan.log
+runtime/scan.log.*
+output/scan.log
+output/scan.log.*
+output/complete_path.log
+
+# Generated outputs
+output/
+
+# Codex-Wrapper local/generated directories
+Codex-Wrapper/venv/
+Codex-Wrapper/submodules/
+Codex-Wrapper/workspace/
