@@ -1,0 +1,2 @@
+internal secret notes
+root_token=dev-root-token
