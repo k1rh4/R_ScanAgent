@@ -1,0 +1,17 @@
+.git
+.gitignore
+__pycache__
+*.py[cod]
+*.so
+*.log
+.python-version
+.venv
+venv
+.env
+.env.*
+pytest_cache
+node_modules
+workspace/*
+!workspace/codex_profile
+!workspace/codex_profile/**
+submodules/codex/.git
