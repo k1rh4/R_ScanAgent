@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
-from typing import Callable, Iterable
+from typing import Any, Callable
 
 import requests
 
@@ -26,14 +27,21 @@ def _parse_int_set(value: str | None) -> set[int]:
 
 
 class LLMClient:
-    def __init__(self, provider: str | None = None, model: str | None = None):
+    def __init__(
+        self,
+        provider: str | None = None,
+        model: str | None = None,
+        trace_logger: Callable[[dict[str, Any]], None] | None = None,
+    ):
         self.provider = (provider or getenv("LLM_PROVIDER", "openai")).lower()
         self.model = model
+        self.trace_logger = trace_logger
         self.timeout = float(getenv("LLM_TIMEOUT", "30"))
         self.retries = int(getenv("LLM_RETRIES", "2"))
         self.backoff = float(getenv("LLM_RETRY_BACKOFF", "0.5"))
         self.backoff_mode = getenv("LLM_RETRY_MODE", "exponential")  # exponential | fixed
         self.retry_statuses = _parse_int_set(getenv("LLM_RETRY_STATUS", "429,500,502,503,504"))
+        self.progress_echo = os.getenv("REDSCAN_LLM_PROGRESS_ECHO", "0").strip().lower() in {"1", "true", "yes", "on"}
 
     def _openai_base_url(self) -> str | None:
         return getenv("OPENAI_BASE_URL") or getenv("LLM_BASE_URL") or "http://localhost:8000/v1"
@@ -56,8 +64,80 @@ class LLMClient:
             return bool(getenv("GEMINI_API_KEY"))
         return False
 
-    def chat(self, system_message: str, user_message: str) -> str:
-        print(f"[progress] LLM에게 요청중... provider={self.provider}", file=sys.stderr, flush=True)
+    def _resolved_model_name(self) -> str:
+        if self.provider == "openai":
+            return self._resolve_model("OPENAI_MODEL", "gpt-5")
+        if self.provider == "anthropic":
+            return self._resolve_model("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+        if self.provider == "gemini":
+            return self._resolve_model("GEMINI_MODEL", "gemini-1.5-pro")
+        return self.model or ""
+
+    def _trace(self, event: dict[str, Any]) -> None:
+        if not self.trace_logger:
+            return
+        try:
+            self.trace_logger(event)
+        except Exception:
+            return
+
+    def chat(self, system_message: str, user_message: str, trace: dict[str, Any] | None = None) -> str:
+        meta = trace or {}
+        provider = self.provider
+        model = self._resolved_model_name()
+        purpose = str(meta.get("purpose", "")).strip() or "general"
+        phase = str(meta.get("phase", "")).strip() or "llm"
+        path = str(meta.get("path", "")).strip() or "-"
+        if self.progress_echo:
+            print(
+                f"[progress] LLM에게 요청중... provider={provider} model={model} phase={phase} purpose={purpose}",
+                file=sys.stderr,
+                flush=True,
+            )
+        self._trace(
+            {
+                "event": "llm_request",
+                "provider": provider,
+                "model": model,
+                "purpose": purpose,
+                "phase": phase,
+                "path": path,
+                "system_prompt": system_message,
+                "user_prompt": user_message,
+            }
+        )
+        started = time.perf_counter()
+        try:
+            out = self._chat_once(system_message, user_message)
+            self._trace(
+                {
+                    "event": "llm_response",
+                    "provider": provider,
+                    "model": model,
+                    "purpose": purpose,
+                    "phase": phase,
+                    "path": path,
+                    "duration_sec": round(time.perf_counter() - started, 3),
+                    "response": out,
+                }
+            )
+            return out
+        except Exception as e:
+            self._trace(
+                {
+                    "event": "llm_error",
+                    "provider": provider,
+                    "model": model,
+                    "purpose": purpose,
+                    "phase": phase,
+                    "path": path,
+                    "duration_sec": round(time.perf_counter() - started, 3),
+                    "error": str(e),
+                }
+            )
+            raise
+
+    def _chat_once(self, system_message: str, user_message: str) -> str:
         if self.provider == "openai":
             return self._with_retry(lambda: self._openai_chat(system_message, user_message))
         if self.provider == "anthropic":

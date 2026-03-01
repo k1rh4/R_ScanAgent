@@ -22,6 +22,26 @@ app = FastAPI(title="Vulnerable Test Target", version="0.1.0")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 
+class SqliBody(BaseModel):
+    user_id: str = "1"
+
+
+class CmdBody(BaseModel):
+    cmd: str = "whoami"
+
+
+class TraversalBody(BaseModel):
+    file: str = "sample.txt"
+
+
+class DownloadBody(BaseModel):
+    path: str = "./uploads/sample.txt"
+
+
+class IdorBody(BaseModel):
+    user_id: int
+
+
 def db_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -287,21 +307,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("app:app", host="0.0.0.0", port=8081, reload=False)
-class SqliBody(BaseModel):
-    user_id: str = "1"
-
-
-class CmdBody(BaseModel):
-    cmd: str = "whoami"
-
-
-class TraversalBody(BaseModel):
-    file: str = "sample.txt"
-
-
-class DownloadBody(BaseModel):
-    path: str = "./uploads/sample.txt"
-
-
-class IdorBody(BaseModel):
-    user_id: int

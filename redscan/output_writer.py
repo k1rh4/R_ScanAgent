@@ -155,6 +155,31 @@ class OutputWriter:
         m = re.search(r"path_hint=([^\\s]+)", evidence)
         return m.group(1) if m else ""
 
+    def _vector_parts(self, vector: str) -> tuple[str, str]:
+        if "/" not in vector:
+            return vector or "-", "-"
+        param, location = vector.split("/", 1)
+        return (param or "-"), (location or "-")
+
+    def _location_label(self, location: str) -> str:
+        mapping = {
+            "query": "query parameter",
+            "body": "body parameter",
+            "cookie": "cookie",
+            "header": "header",
+            "path": "path",
+        }
+        return mapping.get(location, location or "-")
+
+    def _payload_preview(self, payload: Any, limit: int = 180) -> str:
+        text = str(payload or "").strip()
+        if not text:
+            return "(empty)"
+        one_line = " ".join(text.split())
+        if len(one_line) > limit:
+            return one_line[: limit - 3] + "..."
+        return one_line
+
     def write(self, data: dict, path: str, phase: str, result: Dict[str, Any]) -> List[str]:
         findings = result.get("findings", []) if isinstance(result, dict) else []
         verified = [f for f in findings if f.get("analysis_status") == "VERIFIED"]
@@ -191,12 +216,19 @@ class OutputWriter:
             action = finding.get("action", {}) or {}
             tool = action.get("tool", "")
             payload = action.get("payload", "")
+            param, location = self._vector_parts(vector)
+            attack_payload = finding.get("attack_payload", payload)
+            location_label = self._location_label(location)
+            param_label = "URL path" if location == "path" else param
 
             section_lines.extend(
                 [
                     f"### [{i}] {vtype}",
                     f"- 벡터: {vector}",
                     f"- 확인 도구: {tool}",
+                    f"- 공격 위치: {location_label}",
+                    f"- 공격 파라미터: {param_label}",
+                    f"- 주입/변경 값: `{self._payload_preview(attack_payload)}`",
                     f"- 취약점 판단 이유: {reason}",
                     *([f"- 경로: {self._path_hint(evidence)}"] if vector.endswith("/path") and self._path_hint(evidence) else []),
                     *([f"- IDOR 요약: {self._idor_summary(evidence)}"] if vtype == "IDOR" else []),
@@ -237,14 +269,14 @@ class OutputWriter:
             if script_path and script_body:
                 section_lines.extend(
                     [
-                        f"- triage exploit 파일: `{script_path.name}`",
+                        f"- exploit 파일: `{script_path.name}`",
                         "",
                     ]
                 )
             elif script_path:
                 section_lines.extend(
                     [
-                        f"- triage exploit 파일: `{script_path.name}`",
+                        f"- exploit 파일: `{script_path.name}`",
                         "- 비고: 코드 생성은 완료됐지만 본문 표시는 생략됨",
                         "",
                     ]
@@ -252,7 +284,7 @@ class OutputWriter:
             else:
                 section_lines.extend(
                     [
-                        "- triage exploit 파일: 생성 실패",
+                        "- exploit 파일: 생성 실패",
                         "- 비고: action payload를 실행 가능한 코드로 변환하지 못함",
                         "",
                     ]
@@ -265,7 +297,7 @@ class OutputWriter:
             header = [
                 "# RedScan 취약점 리포트",
                 "",
-                "- 설명: 검증된 취약점과 판단 근거, triage용 exploit 파일명을 기록합니다.",
+                "- 설명: 검증된 취약점과 판단 근거, 재현용 exploit 파일명을 기록합니다.",
                 "",
             ]
             report_body = "\n".join(header + section_lines)

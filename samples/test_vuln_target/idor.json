@@ -1,0 +1,5 @@
+{
+  "request": "POST /vuln/idor/orders/102 HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nUser-Agent: RedScan-Test\r\nContent-Type: application/json\r\nAccept: */*\r\nAuthorization: Bearer demo-token\r\nCookie: sessionid=alice-session\r\n\r\n{\"user_id\":1}",
+  "response": "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"request_user_id\":1,\"order\":{\"id\":102,\"user_id\":2,\"item\":\"laptop\",\"amount\":899.0,\"status\":\"paid\"},\"warning\":\"IDOR vulnerable: ownership not validated\"}",
+  "base_url": "http://127.0.0.1:8081"
+}
